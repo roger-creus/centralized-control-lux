@@ -17,6 +17,7 @@ import time
 import random
 import os
 import jpype
+import copy
 
 from IPython import embed
 
@@ -92,7 +93,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
-        
+
+PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
+
+if not os.path.isdir(PATH_AGENT_CHECKPOINTS):
+    os.makedirs(PATH_AGENT_CHECKPOINTS)
+
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
@@ -134,10 +140,6 @@ def make_env(seed):
         return env
 
     return thunk
-
-envs = gym.vector.SyncVectorEnv([make_env(3 + i) for i in range(args.num_envs)])
-
-#assert isinstance(envs.single_action_space, MultiDiscrete), "only MultiDiscrete action space is supported"
 
 # ALGO LOGIC: initialize agent here:
 class CategoricalMasked(Categorical):
@@ -198,67 +200,90 @@ class Agent(nn.Module):
             nn.ReLU()
         )
 
-        # TODO: add factory actor
-
         self.actor_robots = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["robots"].nvec[1:].sum()), std=0.01)
         self.actor_factories = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["factories"].nvec[1:].sum()), std=0.01)
         
         self.critic = layer_init(nn.Linear(256, 1), std=1)
+
+    def save_checkpoint(self):
+        torch.save(self.state_dict(), PATH_AGENT_CHECKPOINTS)
+
+    def freeze_params(self):
+        for param in self.parameters():
+            param.requires_grad = False
 
     def forward(self, x):
         return self.network(x.permute((0, 3, 1, 2))) # "bhwc" -> "bchw"
 
     def get_action(self, x, robot_action=None, factory_action=None, robot_invalid_action_masks=None, factory_invalid_action_masks=None, envs=None, player="player_0"):
         x = self.forward(x)
+
+        # player_0 operates in VecEnv so needs to access the single_obs_space (and action)
+        if player == "player_0":
+            robots_nvec = envs.single_action_space["robots"].nvec
+            robots_nvec_sum = envs.single_action_space["robots"].nvec[1:].sum()
+            robots_nvec_tolist = envs.single_action_space["robots"].nvec[1:].tolist()
+            factories_nvec = envs.single_action_space["factories"].nvec
+            factories_nvec_sum = envs.single_action_space["factories"].nvec[1:].sum()
+            factories_nvec_tolist = envs.single_action_space["factories"].nvec[1:].tolist()
         
+        # player_1 operates in a single custom env so there is no such thing as single_obs_space
+        if player == "player_1":
+            robots_nvec = envs.action_space["robots"].nvec
+            robots_nvec_sum = envs.action_space["robots"].nvec[1:].sum()
+            robots_nvec_tolist = envs.action_space["robots"].nvec[1:].tolist()
+            factories_nvec = envs.action_space["factories"].nvec
+            factories_nvec_sum = envs.action_space["factories"].nvec[1:].sum()
+            factories_nvec_tolist = envs.action_space["factories"].nvec[1:].tolist()
+
         robot_logits = self.actor_robots(x)
-        robot_grid_logits = robot_logits.view(-1, envs.single_action_space["robots"].nvec[1:].sum())
-        robot_split_logits = torch.split(robot_grid_logits, envs.single_action_space["robots"].nvec[1:].tolist(), dim=1)
+        robot_grid_logits = robot_logits.view(-1, robots_nvec_sum)
+        robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist , dim=1)
 
         factory_logits = self.actor_factories(x)
-        factory_grid_logits = factory_logits.view(-1, envs.single_action_space["factories"].nvec[1:].sum())
-        factory_split_logits = torch.split(factory_grid_logits, envs.single_action_space["factories"].nvec[1:].tolist(), dim=1)
+        factory_grid_logits = factory_logits.view(-1, factories_nvec_sum)
+        factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
         
         if robot_action is None and factory_action is None:
             # get robot valid actions
             robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs, player)).to(device)
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
-            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], envs.single_action_space["robots"].nvec[1:].tolist(), dim=1)
+            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
             robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
-            factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], envs.single_action_space["factories"].nvec[1:].tolist(), dim=1)
+            factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
             factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
         else:
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_action = robot_action.view(-1, robot_action.shape[-1]).T
-            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], envs.single_action_space["robots"].nvec[1:].tolist(), dim=1)
+            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
 
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_action = factory_action.view(-1, factory_action.shape[-1]).T
-            factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], envs.single_action_space["factories"].nvec[1:].tolist(), dim=1)
+            factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
         
         robot_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(robot_action, robot_multi_categoricals)])
         robot_entropy = torch.stack([categorical.entropy() for categorical in robot_multi_categoricals])
-        robot_num_predicted_parameters = len(envs.single_action_space["robots"].nvec) - 1
+        robot_num_predicted_parameters = len(robots_nvec) - 1
         robot_logprob = robot_logprob.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_entropy = robot_entropy.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_action = robot_action.T.view(-1, 48 * 48, robot_num_predicted_parameters)
-        robot_invalid_action_masks = robot_invalid_action_masks.view(-1,  48 * 48, envs.single_action_space["robots"].nvec[1:].sum()+1)
+        robot_invalid_action_masks = robot_invalid_action_masks.view(-1,  48 * 48, robots_nvec_sum + 1)
 
         factory_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(factory_action, factory_multi_categoricals)])
         factory_entropy = torch.stack([categorical.entropy() for categorical in factory_multi_categoricals])
-        factory_num_predicted_parameters = len(envs.single_action_space["factories"].nvec) - 1
+        factory_num_predicted_parameters = len(factories_nvec) - 1
         factory_logprob = factory_logprob.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_entropy = factory_entropy.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_action = factory_action.T.view(-1, 48 * 48, factory_num_predicted_parameters)
-        factory_invalid_action_masks = factory_invalid_action_masks.view(-1,  48 * 48, envs.single_action_space["factories"].nvec[1:].sum()+1)
+        factory_invalid_action_masks = factory_invalid_action_masks.view(-1,  48 * 48, factories_nvec_sum + 1)
 
         robot_logprob = robot_logprob.sum(1).sum(1)
         factory_logprob = factory_logprob.sum(1).sum(1)
@@ -273,11 +298,18 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(self.forward(x))
 
-
 init_jvm()
+
+envs = gym.vector.SyncVectorEnv([make_env(3 + i) for i in range(args.num_envs)])
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+for i in range(len(envs.envs)):
+    enemy_agent = Agent().to(device)
+    enemy_agent.load_state_dict(copy.deepcopy(agent.state_dict()))
+    enemy_agent.freeze_params()
+    envs.envs[i].set_enemy_agent(enemy_agent)
 
 if args.anneal_lr:
     lr = lambda f: f * args.learning_rate
@@ -289,14 +321,14 @@ mapsize = 48*48
 robot_action_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 1)
 robot_invalid_action_shape = (mapsize, envs.single_action_space["robots"].nvec[1:].sum()+1)
 
-factories_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
-factories_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum()+1)
+factory_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
+factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum()+1)
 
 robot_actions = torch.zeros((args.num_steps, args.num_envs) + robot_action_space_shape).to(device)
 robot_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_shape).to(device)
 
-factory_actions = torch.zeros((args.num_steps, args.num_envs) + factories_action_space_shape).to(device)
-factory_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + factories_invalid_action_shape).to(device)
+factory_actions = torch.zeros((args.num_steps, args.num_envs) + factory_action_space_shape).to(device)
+factory_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + factory_invalid_action_shape).to(device)
 
 obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
 logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -397,11 +429,19 @@ for update in range(starting_update, num_updates+1):
             factory_java_valid_actions += [JArray(JArray(JInt))(factory_java_valid_action)]
         factory_java_valid_actions = JArray(JArray(JArray(JInt)))(factory_java_valid_actions)
         
-        # IMPORTANT: I AM HERE
-        embed()
+
+        robot_valid_actions = np.array(robot_java_valid_actions, dtype=object)
+        factory_valid_actions = np.array([np.array(xi) for xi in factory_java_valid_actions], dtype=object)
+
+        actions = []
+        for i in range(args.num_envs):
+            actions.append({
+                "factories" : factory_valid_actions[i],
+                "robots" : robot_valid_actions[i]
+            })
 
         try:
-            next_obs, rs, ds, infos = envs.step(java_valid_actions)
+            next_obs, rs, ds, infos = envs.step(actions)
             next_obs = torch.Tensor(next_obs).to(device)
         except Exception as e:
             e.printStackTrace()
@@ -444,14 +484,15 @@ for update in range(starting_update, num_updates+1):
             advantages = returns - values
 
     # flatten the batch
-    b_obs = obs.reshape((-1,)+envs.observation_space.shape)
+    b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
     b_logprobs = logprobs.reshape(-1)
-    b_actions = actions.reshape((-1,)+action_space_shape)
+    b_robot_actions = robot_actions.reshape((-1,) + robot_action_space_shape)
+    b_factory_actions = factory_actions.reshape((-1,) + factory_action_space_shape)
     b_advantages = advantages.reshape(-1)
     b_returns = returns.reshape(-1)
     b_values = values.reshape(-1)
-    b_invalid_action_masks = invalid_action_masks.reshape((-1,)+invalid_action_shape)
-    # TODO: include factory invalid actions
+    b_robot_invalid_action_masks = robot_invalid_action_masks.reshape((-1,) + robot_invalid_action_shape)
+    b_factory_invalid_action_masks = factory_invalid_action_masks.reshape((-1,) + factory_invalid_action_shape)
 
     # Optimizaing the policy and value network
     inds = np.arange(args.batch_size,)
@@ -464,11 +505,15 @@ for update in range(starting_update, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
             # raise
-            _, newlogproba, entropy, _ = agent.get_action(
+
+            _, _, newlogproba, entropy, _, _ = agent.get_action(
                 b_obs[minibatch_ind],
-                b_actions.long()[minibatch_ind],
-                b_invalid_action_masks[minibatch_ind],
-                envs)
+                b_robot_actions.long()[minibatch_ind],
+                b_factory_actions.long()[minibatch_ind],
+                b_robot_invalid_action_masks[minibatch_ind],
+                b_factory_invalid_action_masks[minibatch_ind],
+                envs
+            )
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats
