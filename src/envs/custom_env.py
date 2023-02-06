@@ -3,6 +3,7 @@ import gym
 import numpy as np
 import luxai_s2.env
 import torch
+import math
 
 from IPython import embed
 
@@ -11,6 +12,57 @@ from gym import spaces
 from luxai_s2.env import LuxAI_S2
 from luxai_s2.utils.utils import my_turn_to_place_factory, is_day
 from luxai_s2.map.position import Position
+
+"""
+SOME UTILITIES FOR THE HEURISTIC ENEMY
+"""
+def water_cost(factory, env):
+    game_state = env.state
+    owned_lichen_tiles = (game_state.board.lichen_strains == factory.state_dict()["strain_id"]).sum()
+    return np.ceil(owned_lichen_tiles / env.env_cfg.LICHEN_WATERING_COST_FACTOR)
+
+def direction_to(src, target):
+    ds = target - src
+    dx = ds[0]
+    dy = ds[1]
+    if dx == 0 and dy == 0:
+        return 0
+    if abs(dx) > abs(dy):
+        if dx > 0:
+            return 2 
+        else:
+            return 4
+    else:
+        if dy > 0:
+            return 3
+        else:
+            return 1
+
+# a[1] = direction (0 = center, 1 = up, 2 = right, 3 = down, 4 = left)
+move_deltas = np.array([[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]])
+
+def compute_move_cost(unit, game_state, direction):
+    board = game_state.board
+    target_pos = unit.pos + move_deltas[direction]
+    if target_pos.x < 0 or target_pos.y < 0 or target_pos.y >= len(board.rubble) or target_pos.x >= len(board.rubble[0]):
+        return -1
+
+    factory_there = board.factory_occupancy_map[target_pos.x, target_pos.y]
+
+    unit_agent_id = "player_0"  if unit.unit_id in game_state.units["player_0"] else "player_1"
+
+    if factory_there != -1 and factory_there not in game_state.teams[unit_agent_id].factory_strains:
+        # print("Warning, tried to get move cost for going onto a opposition factory", file=sys.stderr)
+        return -1
+
+    rubble_at_target = board.rubble[target_pos.x][target_pos.y]
+    
+    return math.floor(unit.unit_cfg.MOVE_COST + unit.unit_cfg.RUBBLE_MOVEMENT_COST * rubble_at_target)
+
+def action_queue_cost(unit, env_cfg):
+    unit_type = str(unit.unit_type).split(".")[1]
+    cost = env_cfg.ROBOTS[unit_type].ACTION_QUEUE_POWER_COST
+    return cost
 
 """
 This custom env handles self-play and training of the bidder and placer.
@@ -74,10 +126,13 @@ class CustomLuxEnv(gym.Env):
         player_action = self.act_(action, "player_0")  # returs {"player_0" : actions}
 
         # get enemy action (raw output model)
-        enemy_action = self.enemy_step()
         
+        #enemy_action = self.enemy_step()
         # turn the raw enemy model outputs to game actions
-        enemy_action = self.act_(enemy_action, "player_1") # returs {"player_1" : actions}
+        #enemy_action = self.act_(enemy_action, "player_1") # returs {"player_1" : actions}
+
+        # important: uncomment the lines above and comment this one for self play
+        enemy_action = self.enemy_heuristic_step()
 
         actions = {**player_action, **enemy_action} # final dict of actions from both players to send to the game
 
@@ -149,68 +204,6 @@ class CustomLuxEnv(gym.Env):
 
     def render(self, mode):
         return self.env_.render(mode)
-
-    def enemy_step(self):
-        with torch.no_grad():
-            obs = torch.Tensor(self.current_enemy_obs).unsqueeze(0).to(self.device)
-            robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks = self.enemy_agent.get_action(obs, envs=self, player="player_1")
-
-            # the robot real action adds the source units
-            robot_real_action = torch.cat([
-                torch.stack(
-                    [torch.arange(0, 48 * 48, device= self.device) for i in range(1)
-            ]).unsqueeze(2), robot_action], 2)
-            
-            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
-            # so as to predict an action for each cell in the map; this obviously include a 
-            # lot of invalid actions at cells for which no source units exist, so the rest of 
-            # the code removes these invalid actions to speed things up
-            robot_real_action = robot_real_action.cpu().numpy()
-            robot_valid_actions = robot_real_action[robot_invalid_action_masks[:,:,0].bool().cpu().numpy()]
-            robot_valid_actions_counts = robot_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
-            robot_java_valid_actions = []
-            robot_valid_action_idx = 0
-            for env_idx, robot_valid_action_count in enumerate(robot_valid_actions_counts):
-                robot_java_valid_action = []
-                for c in range(robot_valid_action_count):
-                    robot_java_valid_action += [JArray(JInt)(robot_valid_actions[robot_valid_action_idx])]
-                    robot_valid_action_idx += 1
-                robot_java_valid_actions += [JArray(JArray(JInt))(robot_java_valid_action)]
-            robot_java_valid_actions = JArray(JArray(JArray(JInt)))(robot_java_valid_actions)
-
-            # the robot real action adds the source units
-            factory_real_action = torch.cat([
-                torch.stack(
-                    [torch.arange(0, 48 * 48, device=self.device) for i in range(1)
-            ]).unsqueeze(2), factory_action], 2)
-            
-            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
-            # so as to predict an action for each cell in the map; this obviously include a 
-            # lot of invalid actions at cells for which no source units exist, so the rest of 
-            # the code removes these invalid actions to speed things up
-            factory_real_action = factory_real_action.cpu().numpy()
-            factory_valid_actions = factory_real_action[factory_invalid_action_masks[:,:,0].bool().cpu().numpy()]
-            factory_valid_actions_counts = factory_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
-            factory_java_valid_actions = []
-            factory_valid_action_idx = 0
-            for env_idx, factory_valid_action_count in enumerate(factory_valid_actions_counts):
-                factory_java_valid_action = []
-                for c in range(factory_valid_action_count):
-                    factory_java_valid_action += [JArray(JInt)(factory_valid_actions[factory_valid_action_idx])]
-                    factory_valid_action_idx += 1
-                factory_java_valid_actions += [JArray(JArray(JInt))(factory_java_valid_action)]
-            factory_java_valid_actions = JArray(JArray(JArray(JInt)))(factory_java_valid_actions)
-            
-            robot_valid_actions = np.array(robot_java_valid_actions, dtype=object)
-            factory_valid_actions = np.array([np.array(xi) for xi in factory_java_valid_actions], dtype=object)
-
-            actions =  {
-                "factories" : factory_valid_actions[0],
-                "robots" : robot_valid_actions[0]
-            }
-           
-
-        return actions
 
     def act_(self, action, player):
         """
@@ -575,6 +568,124 @@ class CustomLuxEnv(gym.Env):
 
         # transpose for channel last
         return obs.transpose(1,2,0)
+
+
+    def enemy_heuristic_step(self):
+        actions = dict()
+
+        game_state = self.env_.state
+
+        factories = game_state.factories["player_1"]
+        factory_tiles, factory_units = [], []
+
+        for unit_id, factory in factories.items():
+            if factory.power >= self.env_.env_cfg.ROBOTS["HEAVY"].POWER_COST and factory.cargo.metal >= self.env_.env_cfg.ROBOTS["HEAVY"].METAL_COST:
+                actions[unit_id] = 1
+            if water_cost(factory, self.env_) <= factory.cargo.water / 5 - 200:
+                actions[unit_id] = 2
+            factory_tiles += [np.array([factory.pos.x, factory.pos.y])]
+            factory_units += [factory]
+        factory_tiles = np.array(factory_tiles)
+
+        units = game_state.units["player_1"]
+        ice_map = game_state.board.ice
+        ice_tile_locations = np.argwhere(ice_map == 1)
+        for unit_id, unit in units.items():
+
+            # track the closest factory
+            closest_factory = None
+            adjacent_to_factory = False
+            if len(factory_tiles) > 0:
+                factory_distances = np.mean((factory_tiles - np.array([unit.pos.x, unit.pos.y])) ** 2, 1)
+                closest_factory_tile = factory_tiles[np.argmin(factory_distances)]
+                closest_factory = factory_units[np.argmin(factory_distances)]
+                adjacent_to_factory = np.mean((closest_factory_tile - np.array([unit.pos.x, unit.pos.y])) ** 2) == 0
+
+                # previous ice mining code
+                if unit.cargo.ice < 40:
+                    ice_tile_distances = np.mean((ice_tile_locations - np.array([unit.pos.x, unit.pos.y])) ** 2, 1)
+                    closest_ice_tile = ice_tile_locations[np.argmin(ice_tile_distances)]
+                    if np.all(closest_ice_tile == unit.pos):
+                        if unit.power >= unit.dig_cost(game_state) + action_queue_cost(unit, self.env_.env_cfg):
+                            actions[unit_id] = [np.array([3, 0, 0, 0, 0, 1])]
+                    else:
+                        direction = direction_to(np.array([unit.pos.x, unit.pos.y]), closest_ice_tile)
+                        move_cost = compute_move_cost(unit, game_state, direction)
+                        if move_cost is not None and unit.power >= move_cost + action_queue_cost(unit, self.env_.env_cfg):
+                            actions[unit_id] = [np.array([0, direction, 0, 0, 0, 1])]
+                # else if we have enough ice, we go back to the factory and dump it.
+                elif unit.cargo.ice >= 40:
+                    direction = direction_to(np.array([unit.pos.x, unit.pos.y]), closest_factory_tile)
+                    if adjacent_to_factory:
+                        if unit.power >= action_queue_cost(unit, self.env_.env_cfg):
+                            actions[unit_id] = [np.array([1, direction, 0, unit.cargo.ice, 0, 1])]
+                    else:
+                        move_cost = compute_move_cost(unit, game_state, direction)
+                        if move_cost is not None and unit.power >= move_cost + action_queue_cost(unit, self.env_.env_cfg):
+                            actions[unit_id] = [np.array([0, direction, 0, 0, 0, 1])]
+        
+        return {"player_1" : actions}
+
+    def enemy_step(self):
+        with torch.no_grad():
+            obs = torch.Tensor(self.current_enemy_obs).unsqueeze(0).to(self.device)
+            robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks = self.enemy_agent.get_action(obs, envs=self, player="player_1")
+
+            # the robot real action adds the source units
+            robot_real_action = torch.cat([
+                torch.stack(
+                    [torch.arange(0, 48 * 48, device= self.device) for i in range(1)
+            ]).unsqueeze(2), robot_action], 2)
+            
+            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+            # so as to predict an action for each cell in the map; this obviously include a 
+            # lot of invalid actions at cells for which no source units exist, so the rest of 
+            # the code removes these invalid actions to speed things up
+            robot_real_action = robot_real_action.cpu().numpy()
+            robot_valid_actions = robot_real_action[robot_invalid_action_masks[:,:,0].bool().cpu().numpy()]
+            robot_valid_actions_counts = robot_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
+            robot_java_valid_actions = []
+            robot_valid_action_idx = 0
+            for env_idx, robot_valid_action_count in enumerate(robot_valid_actions_counts):
+                robot_java_valid_action = []
+                for c in range(robot_valid_action_count):
+                    robot_java_valid_action += [JArray(JInt)(robot_valid_actions[robot_valid_action_idx])]
+                    robot_valid_action_idx += 1
+                robot_java_valid_actions += [JArray(JArray(JInt))(robot_java_valid_action)]
+            robot_java_valid_actions = JArray(JArray(JArray(JInt)))(robot_java_valid_actions)
+
+            # the robot real action adds the source units
+            factory_real_action = torch.cat([
+                torch.stack(
+                    [torch.arange(0, 48 * 48, device=self.device) for i in range(1)
+            ]).unsqueeze(2), factory_action], 2)
+            
+            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+            # so as to predict an action for each cell in the map; this obviously include a 
+            # lot of invalid actions at cells for which no source units exist, so the rest of 
+            # the code removes these invalid actions to speed things up
+            factory_real_action = factory_real_action.cpu().numpy()
+            factory_valid_actions = factory_real_action[factory_invalid_action_masks[:,:,0].bool().cpu().numpy()]
+            factory_valid_actions_counts = factory_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
+            factory_java_valid_actions = []
+            factory_valid_action_idx = 0
+            for env_idx, factory_valid_action_count in enumerate(factory_valid_actions_counts):
+                factory_java_valid_action = []
+                for c in range(factory_valid_action_count):
+                    factory_java_valid_action += [JArray(JInt)(factory_valid_actions[factory_valid_action_idx])]
+                    factory_valid_action_idx += 1
+                factory_java_valid_actions += [JArray(JArray(JInt))(factory_java_valid_action)]
+            factory_java_valid_actions = JArray(JArray(JArray(JInt)))(factory_java_valid_actions)
+            
+            robot_valid_actions = np.array(robot_java_valid_actions, dtype=object)
+            factory_valid_actions = np.array([np.array(xi) for xi in factory_java_valid_actions], dtype=object)
+
+            actions =  {
+                "factories" : factory_valid_actions[0],
+                "robots" : robot_valid_actions[0]
+            }
+           
+        return actions
 
     def set_enemy_agent(self, agent):
         self.enemy_agent = agent
