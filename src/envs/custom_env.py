@@ -84,6 +84,18 @@ class CustomLuxEnv(gym.Env):
         # step actions to true env
         observations, reward, done, info = self.env_.step(actions)
 
+        done =  done["player_0"]
+
+        # important: using sparse reward
+        # important: that both agents get -1000 at the same time happens more often than expected when they are random. 
+        # how to deal with this?
+        if reward["player_0"] == -1000:
+            reward = -1
+        elif reward["player_1"] == -1000:
+            reward = 1
+        else:
+            reward = 0
+
         # keep the current game state updated
         self.current_state = observations
     
@@ -92,7 +104,7 @@ class CustomLuxEnv(gym.Env):
         self.current_enemy_obs = self.obs_(observations, "player_1")
 
         # important: only return from the point of view of player! enemy is handled as part of the environment
-        return self.current_player_obs, reward["player_0"], done["player_0"], info["player_0"]
+        return self.current_player_obs, reward, done, info["player_0"]
 
     def reset(self):
         observations = self.env_.reset()
