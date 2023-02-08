@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import wandb
+
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -33,7 +35,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="MicrortsDefeatCoacAIShaped-v3",
+    parser.add_argument('--gym-id', type=str, default="Lux",
                         help='the id of the gym environment')
     parser.add_argument('--learning-rate', type=float, default=2.5e-4,
                         help='the learning rate of the optimizer')
@@ -49,9 +51,9 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
+    parser.add_argument('--wandb-project-name', type=str, default="lux",
                         help="the wandb's project name")
-    parser.add_argument('--wandb-entity', type=str, default=None,
+    parser.add_argument('--wandb-entity', type=str, default="rogercreus",
                         help="the entity (team) of wandb's project")
 
     # Algorithm specific arguments
@@ -94,11 +96,6 @@ if __name__ == "__main__":
     if not args.seed:
         args.seed = int(time.time())
 
-PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
-
-if not os.path.isdir(PATH_AGENT_CHECKPOINTS):
-    os.makedirs(PATH_AGENT_CHECKPOINTS)
-
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
@@ -108,17 +105,20 @@ writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
         '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 
+
+# Utility for JArrays
 def init_jvm(jvmpath=None):
     if jpype.isJVMStarted():
         return
     jpype.startJVM(jpype.getDefaultJVMPath())
-
+    
+# WandB Logging
 if args.prod_mode:
     import wandb
     run = wandb.init(
         project=args.wandb_project_name, entity=args.wandb_entity,
-        # sync_tensorboard=True,
         config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+
     wandb.tensorboard.patch(save=False)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
     CHECKPOINT_FREQUENCY = 50
@@ -130,7 +130,8 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
-def make_env(seed):
+# utility to create Vectorized Env
+def make_env(seed, idx):
     def thunk():
         env = CustomLuxEnv()
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -138,10 +139,9 @@ def make_env(seed):
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
         return env
-
     return thunk
 
-# ALGO LOGIC: initialize agent here:
+# Define a Masked Categorical distribution to sample legal actions only 
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
         self.masks = masks
@@ -159,14 +159,7 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
 
-class Scale(nn.Module):
-    def __init__(self, scale):
-        super().__init__()
-        self.scale = scale
-
-    def forward(self, x):
-        return x * self.scale
-
+# Utility used in the CNNs of the Agent
 class Transpose(nn.Module):
     def __init__(self, permutation):
         super().__init__()
@@ -175,17 +168,21 @@ class Transpose(nn.Module):
     def forward(self, x):
         return x.permute(self.permutation)
 
+# Utility to initialize the weights of the agent
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+#### The Agent Neural Network ####
 class Agent(nn.Module):
     def __init__(self, mapsize=48*48):
         super(Agent, self).__init__()
         
         self.mapsize = mapsize
 
+        # Feature extractor: stack of input feature maps -> hidden representation (vector) 
+        # this can be a CNN or a ResNet
         self.network = nn.Sequential(
             layer_init(nn.Conv2d(22, 16, kernel_size=3, stride=2)),
             nn.ReLU(),
@@ -200,9 +197,12 @@ class Agent(nn.Module):
             nn.ReLU()
         )
 
+        # we have a different actor for robots and factories with different action spaces
         self.actor_robots = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["robots"].nvec[1:].sum()), std=0.01)
+
         self.actor_factories = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["factories"].nvec[1:].sum()), std=0.01)
         
+        # we only have one critic that outputs the value of a state
         self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def save_checkpoint(self):
@@ -300,7 +300,7 @@ class Agent(nn.Module):
 
 init_jvm()
 
-envs = gym.vector.SyncVectorEnv([make_env(3 + i) for i in range(args.num_envs)])
+envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i) for i in range(args.num_envs)])
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -319,10 +319,10 @@ mapsize = 48*48
 
 # TODO: why is there +1 in invalid action shape?
 robot_action_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 1)
-robot_invalid_action_shape = (mapsize, envs.single_action_space["robots"].nvec[1:].sum()+1)
+robot_invalid_action_shape = (mapsize, envs.single_action_space["robots"].nvec[1:].sum() + 1)
 
 factory_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
-factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum()+1)
+factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum() + 1)
 
 robot_actions = torch.zeros((args.num_steps, args.num_envs) + robot_action_space_shape).to(device)
 robot_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_shape).to(device)
@@ -451,8 +451,10 @@ for update in range(starting_update, num_updates+1):
 
         for info in infos:
             if 'episode' in info.keys():
-                print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+                print(f"global_step={global_step}, episode_reward={info['episode']['r']}, episode_winner={'player_0' if info['result'] == 1 else 'player_1'}")
                 writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+                writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
+                writer.add_scalar("charts/episode_winner", info['result'], global_step)
                 break
 
     # bootstrap reward if not done. reached the batch limit
