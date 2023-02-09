@@ -305,6 +305,25 @@ class CustomLuxEnv(gym.Env):
         
         return spawn_index
     
+    # Heuristic used to determine bidding amount
+    def bidding_heuristic(self, resources_amount):
+        # List of possible means for the Gaussian distribution
+        means_list = [-resources_amount*0.50, -resources_amount*0.25, -resources_amount*0.125, 0,
+                 resources_amount*0.1250, resources_amount*0.25, resources_amount*0.5]
+        means = np.random.choice(means_list, size=2)
+        variances_multiplier = np.random.choice([0.025, 0.05, 0.075], size=2)
+        # Variances that are used for the Gaussian distribution
+        variances = resources_amount*variances_multiplier
+        
+        bids = np.random.randn(2)*variances+means
+        # Making sure that the bids don't exceed the total resources amount
+        for i in range(len(bids)):
+            if bids[i] > resources_amount:
+                bids[i] = resources_amount
+            if bids[i] < -resources_amount:
+                bids[i] = -resources_amount
+        
+        return bids
 
     def reset(self):
         observations = self.env_.reset()
@@ -318,8 +337,12 @@ class CustomLuxEnv(gym.Env):
         #self.current_enemy_obs = self.obs_bid_phase_(observations, "player_1")
 
         # TODO: get action from bidder model (preprocess into placer format)
+
+        #Total resources that are available to bid
         resources_amount = observations["player_0"]["board"]["factories_per_team"]*150
+        
         bids = self.bidding_heuristic(resources_amount)
+        
         actions = {"player_0" : {"bid" : bids[0], "faction" : "AlphaStrike"}, "player_1" : {"bid" : bids[1], "faction" : "AlphaStrike"}}
 
         # step into factory placement phase
