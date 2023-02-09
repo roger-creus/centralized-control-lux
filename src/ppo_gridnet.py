@@ -92,6 +92,15 @@ if __name__ == "__main__":
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
+    parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+                            help="train by selfplay")
+    parser.add_argument('--save-every', type=int, default=100,
+                            help="how many train updates between saving a new checkpoint and loading a new enemy")
+    parser.add_argument('--load-every', type=int, default=15,
+                            help="how many train updates between saving a new checkpoint and loading a new enemy")
+    parser.add_argument('--pool-size', type=int, default=10,
+                            help="how many checkpoints to keep")                        
+
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -99,12 +108,16 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
+if args.self_play:
+    PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
+    if not os.path.exists(PATH_AGENT_CHECKPOINTS):
+        os.makedirs(PATH_AGENT_CHECKPOINTS)
+
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
         '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
-
 
 # Utility for JArrays
 def init_jvm(jvmpath=None):
@@ -131,9 +144,9 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
 # utility to create Vectorized Env
-def make_env(seed, idx):
+def make_env(seed, idx, self_play):
     def thunk():
-        env = CustomLuxEnv()
+        env = CustomLuxEnv(self_play=self_play)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -205,8 +218,30 @@ class Agent(nn.Module):
         # we only have one critic that outputs the value of a state
         self.critic = layer_init(nn.Linear(256, 1), std=1)
 
-    def save_checkpoint(self):
-        torch.save(self.state_dict(), PATH_AGENT_CHECKPOINTS)
+    def save_checkpoint(self, idx, pool_size, path):
+        ckpts = os.listdir(path)
+        ckpts.sort(key=lambda f: int(f.split(".")[0]))
+        count = len(ckpts)
+        torch.save(self.state_dict(), os.path.join(path, str(idx) + ".pt"))
+
+        if count >= pool_size:
+            os.remove(os.path.join(path, ckpts[0]))
+
+    def load_checkpoint(self, path):
+        ckpts = os.listdir(path)
+        ckpts.sort(key=lambda f: int(f.split(".")[0]))
+
+        import random
+        r = random.uniform(0, 1)
+
+        # with 50% chance load most recent ckpt
+        if r <= 0.5 or len(ckpts) == 1:
+            weights = torch.load(os.path.join(path, ckpts[-1]))
+        else:
+            weights = torch.load(os.path.join(path, np.random.choice(ckpts[:-1])))
+
+        self.load_state_dict(weights)
+        self.freeze_params()
 
     def freeze_params(self):
         for param in self.parameters():
@@ -300,14 +335,17 @@ class Agent(nn.Module):
 
 init_jvm()
 
-envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i) for i in range(args.num_envs)])
+envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i, args.self_play) for i in range(args.num_envs)])
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+num_models_saved = 0
+agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+num_models_saved += 1
+
 for i in range(len(envs.envs)):
     enemy_agent = Agent().to(device)
-    enemy_agent.load_state_dict(copy.deepcopy(agent.state_dict()))
     enemy_agent.freeze_params()
     envs.envs[i].set_enemy_agent(enemy_agent)
 
@@ -357,6 +395,7 @@ if args.prod_mode and wandb.run.resumed:
     agent.load_state_dict(torch.load(f"models/{experiment_name}/agent.pt", map_location=device))
     agent.eval()
     print(f"resumed at update {starting_update}")
+
 
 for update in range(starting_update, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -554,6 +593,14 @@ for update in range(starting_update, num_updates+1):
         else:
             if update % CHECKPOINT_FREQUENCY == 0:
                 torch.save(agent.state_dict(), f"{wandb.run.dir}/agent.pt")
+
+    if update % args.save_every:
+        agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+        num_models_saved += 1
+
+    if update % args.load_every:
+        for i in range(len(envs.envs)):
+            envs.envs[i].update_enemy_agent()
 
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)

@@ -20,6 +20,8 @@ from luxai_s2.spaces.act_space import ActionsQueue
 SOME UTILITIES FOR THE HEURISTIC ENEMY
 """
 RESOURCE_MAPPING = {0:"ice", 1:"ore", 2:"water", 3:"metal"}
+PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
+
 
 def water_cost(factory, env):
     game_state = env.state
@@ -75,16 +77,18 @@ This custom env handles self-play and training of the bidder and placer.
 2) Every reset() call makes it to the normal game phase directly (queries the bidder and placer before resetting and trains them with a DQN-like algo and replay buffer)
 """
 class CustomLuxEnv(gym.Env):
-    def __init__(self, env_cfg = None):
+    def __init__(self, self_play=False, env_cfg = None):
         # the tru env
         self.env_ = LuxAI_S2(env_cfg, verbose=False)
         
+        self.self_play = self_play
+
+        self.device = "cuda:0"
+
         # observation space
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 22), dtype=np.float64)
         
         # keep running channel-wise statistics for normalisation each feature map independently
-        self.running_means = np.zeros((48,48,22))
-        self.running_std = np.zeros((48,48,22))
 
         # ROBOTS
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
@@ -137,12 +141,15 @@ class CustomLuxEnv(gym.Env):
         # turn the raw player model outputs to game actions
         player_action = self.act_(action, "player_0")  # returs {"player_0" : actions}
 
-        # get enemy action (raw output model)
-        #enemy_action = self.enemy_step()
-        # turn the raw enemy model outputs to game actions
-        #enemy_action = self.act_(enemy_action, "player_1") # returs {"player_1" : actions}
+        
+        if self.self_play:
+            # get enemy action (raw output model)
+            enemy_action = self.enemy_step()
+            # turn the raw enemy model outputs to game actions
+            enemy_action = self.act_(enemy_action, "player_1") # returs {"player_1" : actions}
 
-        enemy_action = self.enemy_heuristic_step()
+        if self.self_play is False:
+            enemy_action = self.enemy_heuristic_step()
 
         actions = {**player_action, **enemy_action} # final dict of actions from both players to send to the game
 
@@ -150,11 +157,11 @@ class CustomLuxEnv(gym.Env):
         observations, reward, done, info = self.env_.step(actions)
 
         if reward["player_0"] == -1000:
-            reward_now = -10
+            reward_now = -1
             info["player_0"]["result"] = -1
         elif reward["player_1"] == -1000:
             info["player_0"]["result"] = 1
-            reward_now = 10
+            reward_now = 1
         else:
             if self.is_sparse_reward:
                 reward_now = 0
@@ -178,6 +185,43 @@ class CustomLuxEnv(gym.Env):
         # important: only return from the point of view of player! enemy is handled as part of the environment
         return self.current_player_obs, reward_now, done, info["player_0"]
 
+    def placement_heuristic(self, observations, agent):
+        area = 47
+        # Used to store the values computed by the heuristic of the cells 
+        values_array = np.zeros((48,48))
+        resources_array = observations[agent]["board"]["ice"] + observations[agent]["board"]["ore"]
+        # 2d locations of the resources
+        resources_location = np.array(list(zip(*np.where(resources_array == 1))))
+        for i in resources_location:
+            for j in range(area):
+                values_array[max(0, i[0]-(area-j)):min(47, i[0]+(area-j)), max(0, i[1]-(area-j)):min(47, i[1]+(area-j))] += (1/(area-j))
+        valid_spawns = observations[agent]["board"]["valid_spawns_mask"]
+        valid_grid = values_array * valid_spawns
+        # Flattened index of the valid cell with the highest value
+        spawn_loc = np.argmax(valid_grid)
+        # 2d index
+        spawn_index = np.unravel_index(spawn_loc, (48,48))
+        
+        return spawn_index
+
+    def bidding_heuristic(self, resources_amount):
+        # List of possible means for the Gaussian distribution
+        means_list = [-resources_amount*0.50, -resources_amount*0.25, -resources_amount*0.125, 0, resources_amount*0.1250, resources_amount*0.25, resources_amount*0.5]
+        means = np.random.choice(means_list, size=2)
+        variances_multiplier = np.random.choice([0.025, 0.05, 0.075], size=2)
+        # Variances that are used for the Gaussian distribution
+        variances = resources_amount*variances_multiplier
+        
+        bids = np.random.randn(2)*variances+means
+        # Making sure that the bids don't exceed the total resources amount
+        for i in range(len(bids)):
+            if bids[i] > resources_amount:
+                bids[i] = resources_amount
+            if bids[i] < -resources_amount:
+                bids[i] = -resources_amount
+        
+        return bids
+
     def reset(self):
         observations = self.env_.reset()
         self.prev_lichen = 0
@@ -190,7 +234,9 @@ class CustomLuxEnv(gym.Env):
         #self.current_enemy_obs = self.obs_bid_phase_(observations, "player_1")
 
         # TODO: get action from bidder model (preprocess into placer format)
-        actions = {"player_0" : {"bid" : 0, "faction" : "AlphaStrike"}, "player_1" : {"bid" : 0, "faction" : "AlphaStrike"}}
+        resources_amount = observations["player_0"]["board"]["factories_per_team"]*150
+        bids = self.bidding_heuristic(resources_amount)
+        actions = {"player_0" : {"bid" : bids[0], "faction" : "AlphaStrike"}, "player_1" : {"bid" : bids[1], "faction" : "AlphaStrike"}}
 
         # step into factory placement phase
         observations, _, _, _ = self.env_.step(actions)
@@ -202,8 +248,7 @@ class CustomLuxEnv(gym.Env):
             for agent in self.env_.agents:
                 if my_turn_to_place_factory(observations[agent]["teams"][agent]["place_first"], self.env_.state.env_steps):
                     # TODO: get action from placer model
-                    potential_spawns = np.array(list(zip(*np.where(observations[agent]["board"]["valid_spawns_mask"] == 1))))
-                    spawn_loc = potential_spawns[np.random.randint(0, len(potential_spawns))]
+                    spawn_loc = self.placement_heuristic(observations, agent)
                     action[agent] = dict(spawn=spawn_loc, metal=150, water=150)
                 else:
                     action[agent] = dict()
@@ -595,6 +640,67 @@ class CustomLuxEnv(gym.Env):
         return obs.transpose(1,2,0)
 
 
+    def enemy_step(self):
+        with torch.no_grad():
+            obs = torch.Tensor(self.current_enemy_obs).unsqueeze(0).to(self.device)
+            robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks = self.enemy_agent.get_action(obs, envs=self, player="player_1")
+
+            # the robot real action adds the source units
+            robot_real_action = torch.cat([
+                torch.stack(
+                    [torch.arange(0, 48 * 48, device= self.device) for i in range(1)
+            ]).unsqueeze(2), robot_action], 2)
+
+            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+            # so as to predict an action for each cell in the map; this obviously include a 
+            # lot of invalid actions at cells for which no source units exist, so the rest of 
+            # the code removes these invalid actions to speed things up
+            robot_real_action = robot_real_action.cpu().numpy()
+            robot_valid_actions = robot_real_action[robot_invalid_action_masks[:,:,0].bool().cpu().numpy()]
+            robot_valid_actions_counts = robot_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
+            robot_java_valid_actions = []
+            robot_valid_action_idx = 0
+            for env_idx, robot_valid_action_count in enumerate(robot_valid_actions_counts):
+                robot_java_valid_action = []
+                for c in range(robot_valid_action_count):
+                    robot_java_valid_action += [JArray(JInt)(robot_valid_actions[robot_valid_action_idx])]
+                    robot_valid_action_idx += 1
+                robot_java_valid_actions += [JArray(JArray(JInt))(robot_java_valid_action)]
+            robot_java_valid_actions = JArray(JArray(JArray(JInt)))(robot_java_valid_actions)
+
+            # the robot real action adds the source units
+            factory_real_action = torch.cat([
+                torch.stack(
+                    [torch.arange(0, 48 * 48, device=self.device) for i in range(1)
+            ]).unsqueeze(2), factory_action], 2)
+
+            # at this point, the `real_action` has shape (num_envs, map_height*map_width, 8)
+            # so as to predict an action for each cell in the map; this obviously include a 
+            # lot of invalid actions at cells for which no source units exist, so the rest of 
+            # the code removes these invalid actions to speed things up
+            factory_real_action = factory_real_action.cpu().numpy()
+            factory_valid_actions = factory_real_action[factory_invalid_action_masks[:,:,0].bool().cpu().numpy()]
+            factory_valid_actions_counts = factory_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
+            factory_java_valid_actions = []
+            factory_valid_action_idx = 0
+            for env_idx, factory_valid_action_count in enumerate(factory_valid_actions_counts):
+                factory_java_valid_action = []
+                for c in range(factory_valid_action_count):
+                    factory_java_valid_action += [JArray(JInt)(factory_valid_actions[factory_valid_action_idx])]
+                    factory_valid_action_idx += 1
+                factory_java_valid_actions += [JArray(JArray(JInt))(factory_java_valid_action)]
+            factory_java_valid_actions = JArray(JArray(JArray(JInt)))(factory_java_valid_actions)
+
+            robot_valid_actions = np.array(robot_java_valid_actions, dtype=object)
+            factory_valid_actions = np.array([np.array(xi) for xi in factory_java_valid_actions], dtype=object)
+
+            actions =  {
+                "factories" : factory_valid_actions[0],
+                "robots" : robot_valid_actions[0]
+            }
+
+        return actions
+
     def enemy_heuristic_step(self):
         actions = dict()
 
@@ -653,6 +759,10 @@ class CustomLuxEnv(gym.Env):
 
     def set_enemy_agent(self, agent):
         self.enemy_agent = agent
+
+    def update_enemy_agent(self):
+        print("updating my enemy agent!")
+        self.enemy_agent.load_checkpoint(PATH_AGENT_CHECKPOINTS)
 
 
 def make_env(seed):

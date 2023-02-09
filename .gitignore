@@ -6,3 +6,7 @@ runs/*
 
 src/runs/*
 /src/runs/*
+
+/src/wandb/*
+src/wandb/*
+wandb/*
