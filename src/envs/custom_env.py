@@ -161,6 +161,26 @@ class CustomLuxEnv(gym.Env):
         # important: only return from the point of view of player! enemy is handled as part of the environment
         return self.current_player_obs, reward, done, info["player_0"]
 
+    def placement_heuristic(self, observations, agent):
+        area = 47
+        # Used to store the values computed by the heuristic of the cells 
+        values_array = np.zeros((48,48))
+        resources_array = observations[agent]["board"]["ice"] + observations[agent]["board"]["ore"]
+        # 2d locations of the resources
+        resources_location = np.array(list(zip(*np.where(resources_array == 1))))
+        for i in resources_location:
+            for j in range(area):
+                values_array[max(0, i[0]-(area-j)):min(47, i[0]+(area-j)), max(0, i[1]-(area-j)):min(47, i[1]+(area-j))] += (1/(area-j))
+        valid_spawns = observations[agent]["board"]["valid_spawns_mask"]
+        valid_grid = values_array * valid_spawns
+        # Flattened index of the valid cell with the highest value
+        spawn_loc = np.argmax(valid_grid)
+        # 2d index
+        spawn_index = np.unravel_index(spawn_loc, (48,48))
+        
+        return spawn_index
+    
+
     def reset(self):
         observations = self.env_.reset()
 
@@ -184,8 +204,9 @@ class CustomLuxEnv(gym.Env):
             for agent in self.env_.agents:
                 if my_turn_to_place_factory(observations[agent]["teams"][agent]["place_first"], self.env_.state.env_steps):
                     # TODO: get action from placer model
-                    potential_spawns = np.array(list(zip(*np.where(observations[agent]["board"]["valid_spawns_mask"] == 1))))
-                    spawn_loc = potential_spawns[np.random.randint(0, len(potential_spawns))]
+#                     potential_spawns = np.array(list(zip(*np.where(observations[agent]["board"]["valid_spawns_mask"] == 1))))
+#                     spawn_loc = potential_spawns[np.random.randint(0, len(potential_spawns))]
+                    spawn_loc = self.placement_heuristic(observations, agent)
                     action[agent] = dict(spawn=spawn_loc, metal=150, water=150)
                 else:
                     action[agent] = dict()
@@ -712,5 +733,3 @@ if __name__ == "__main__":
     action = dict()
     action["factories"] = [10, 2]
     action["robots"] = [15, 2, 1, 1, 1, 1, 1, 1, 1, 0]
-
-    embed()
