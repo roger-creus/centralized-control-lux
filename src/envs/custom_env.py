@@ -286,6 +286,26 @@ class CustomLuxEnv(gym.Env):
         
         return bids
 
+    def placement_heuristic(self, observations, agent):
+        area = 47
+        # Used to store the values computed by the heuristic of the cells 
+        values_array = np.zeros((48,48))
+        resources_array = observations[agent]["board"]["ice"] + observations[agent]["board"]["ore"]
+        # 2d locations of the resources
+        resources_location = np.array(list(zip(*np.where(resources_array == 1))))
+        for i in resources_location:
+            for j in range(area):
+                values_array[max(0, i[0]-(area-j)):min(47, i[0]+(area-j)), max(0, i[1]-(area-j)):min(47, i[1]+(area-j))] += (1/(area-j))
+        valid_spawns = observations[agent]["board"]["valid_spawns_mask"]
+        valid_grid = values_array * valid_spawns
+        # Flattened index of the valid cell with the highest value
+        spawn_loc = np.argmax(valid_grid)
+        # 2d index
+        spawn_index = np.unravel_index(spawn_loc, (48,48))
+        
+        return spawn_index
+    
+
     def reset(self):
         observations = self.env_.reset()
         self.prev_lichen = 0
