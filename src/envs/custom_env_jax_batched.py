@@ -112,6 +112,4 @@ if __name__ == "__main__":
         "player_0" : {"spawn" : np.ones((batch_size, 1, 1)), "water" : np.ones((batch_size, 1)), "metal" : np.ones((batch_size, 1))}
     }
 
-    embed()
-
     env.step(place_action)
