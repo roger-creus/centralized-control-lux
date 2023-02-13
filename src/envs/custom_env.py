@@ -125,8 +125,9 @@ class CustomLuxEnv(gym.Env):
         self.placer = None
         
         # reward definition
-        self.is_sparse_reward = True
+        self.is_sparse_reward = False
         self.prev_lichen = 0
+        self.num_factories = 0
 
         # keeps updated versions of the player and enemy observations (preprocessed observations)
         self.current_player_obs = None
@@ -166,8 +167,37 @@ class CustomLuxEnv(gym.Env):
             if self.is_sparse_reward:
                 reward_now = 0
             else:
-                reward_now = (reward["player_0"] - self.prev_lichen) / 100
+                
+
+                rewards = np.zeros(5)
+                weights = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+
+                lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
                 self.prev_lichen = reward["player_0"]
+                rewards[0] = lichen_reward
+
+                # Water threshold penalty
+                water_threshold = 15
+                num_factories = len(observations["player_0"]["factories"]["player_0"].keys())
+                factories_water_shortage = -sum([water_threshold-observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys() if observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] < water_threshold])
+                rewards[1] = factories_water_shortage/(num_factories*water_threshold)
+
+                # Losing factory penalty
+                if num_factories - self.num_factories < 0:
+                    factories_lost = num_factories - self.num_factories
+                    rewards[2] = factories_lost/self.num_factories
+                self.num_factories = num_factories
+
+                # Power threshold penalty
+                power_threshold = 50
+                num_units = len(observations["player_0"]["units"]["player_0"].keys())
+                if num_units != 0:
+                    unit_power_shortage = -sum([power_threshold-observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold])
+                    rewards[3] = unit_power_shortage/(num_units*power_threshold)
+
+
+                reward_now = weights * rewards
+                reward_now = np.sum(reward_now)
 
         done =  done["player_0"]
 
@@ -280,6 +310,10 @@ class CustomLuxEnv(gym.Env):
         # step into factory placement phase
         observations, _, _, _ = self.env_.step(actions)
 
+
+        factory_amount = {"player_0" : 0, "player_1" : 0}
+        for player in factory_amount.keys():
+            factory_amount[player] = observations["player_0"]["teams"][player]["water"]/observations["player_0"]["teams"][player]["factories_to_place"]
         # handle all the factory placement phase
         while self.env_.state.real_env_steps < 0:
             action = dict()
@@ -288,7 +322,7 @@ class CustomLuxEnv(gym.Env):
                 if my_turn_to_place_factory(observations[agent]["teams"][agent]["place_first"], self.env_.state.env_steps):
                     # TODO: get action from placer model
                     spawn_loc = self.placement_heuristic(observations, agent)
-                    action[agent] = dict(spawn=spawn_loc, metal=150, water=150)
+                    action[agent] = dict(spawn=spawn_loc, metal=factory_amount[agent], water=factory_amount[agent])
                 else:
                     action[agent] = dict()
             
