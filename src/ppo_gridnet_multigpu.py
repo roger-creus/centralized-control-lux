@@ -127,7 +127,6 @@ def make_env(seed, idx, self_play, device):
         return env
     return thunk
 
-
 # Define a Masked Categorical distribution to sample legal actions only 
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
@@ -146,6 +145,9 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
 
+    def argmax(self):
+        return torch.argmax(self.logits, dim=1)
+
 # Utility used in the CNNs of the Agent
 class Transpose(nn.Module):
     def __init__(self, permutation):
@@ -161,19 +163,13 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-def layer_init_normed(layer, norm_dim, scale=1.0):
-    with torch.no_grad():
-        layer.weight.data *= scale / layer.weight.norm(dim=norm_dim, p=2, keepdim=True)
-        layer.bias *= 0
-    return layer
-
 class ResidualBlock(nn.Module):
-    def __init__(self, channels, scale):
+    def __init__(self, channels):
         super().__init__()
         conv0 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-        self.conv0 = layer_init_normed(conv0, norm_dim=(1, 2, 3), scale=scale)
+        self.conv0 = layer_init(conv0)
         conv1 = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1)
-        self.conv1 = layer_init_normed(conv1, norm_dim=(1, 2, 3), scale=scale)
+        self.conv1 = layer_init(conv1)
     def forward(self, x):
         inputs = x
         x = nn.functional.relu(x)
@@ -183,16 +179,15 @@ class ResidualBlock(nn.Module):
         return x + inputs
 
 class ConvSequence(nn.Module):
-    def __init__(self, input_shape, out_channels, scale):
+    def __init__(self, input_shape, out_channels):
         super().__init__()
         self._input_shape = input_shape
         self._out_channels = out_channels
         conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1)
-        self.conv = layer_init_normed(conv, norm_dim=(1, 2, 3), scale=1.0)
-        nblocks = 2  # Set to the number of residual blocks
-        scale = scale / np.sqrt(nblocks)
-        self.res_block0 = ResidualBlock(self._out_channels, scale=scale)
-        self.res_block1 = ResidualBlock(self._out_channels, scale=scale)
+        self.conv = layer_init(conv)
+
+        self.res_block0 = ResidualBlock(self._out_channels)
+        self.res_block1 = ResidualBlock(self._out_channels)
 
     def forward(self, x):
         x = self.conv(x)
@@ -219,12 +214,13 @@ class Agent(nn.Module):
         chans = [32, 64, 64]
         scale = 1 / np.sqrt(len(chans))  # Not fully sure about the logic behind this but its used in PPG code
         for out_channels in chans:
-            conv_seq = ConvSequence(shape, out_channels, scale=scale)
+            conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
 
         encodertop = nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256)
-        encodertop = layer_init_normed(encodertop, norm_dim=1, scale=1.4)
+        encodertop = layer_init(encodertop)
+
         conv_seqs += [
             nn.Flatten(),
             nn.ReLU(),
@@ -256,12 +252,12 @@ class Agent(nn.Module):
         nvec_robots = envs.single_action_space["robots"].nvec[1:].sum()
         nvec_factories = envs.single_action_space["factories"].nvec[1:].sum()
 
-        self.actor_robots = layer_init_normed(nn.Linear(256, self.mapsize * nvec_robots), norm_dim=1, scale=0.1)
+        self.actor_robots = layer_init(nn.Linear(256, self.mapsize * nvec_robots), std=0.01)
 
-        self.actor_factories = layer_init_normed(nn.Linear(256, self.mapsize * nvec_factories), norm_dim=1, scale=0.1)
+        self.actor_factories = layer_init(nn.Linear(256, self.mapsize * nvec_factories), std=0.01)
         
         # we only have one critic that outputs the value of a state
-        self.critic = layer_init_normed(nn.Linear(256, 1), norm_dim=1, scale=0.1)
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def save_checkpoint(self, idx, pool_size, path):
         ckpts = os.listdir(path)
@@ -330,20 +326,25 @@ class Agent(nn.Module):
             robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs, player)).to(device)
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
+            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
             
             if player == "player_0":
-                robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
                 robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
 
             if player == "player_1":
-                pass
+                robot_action = torch.stack([categorical.argmax() for categorical in robot_multi_categoricals])
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
-            factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
+            
+            if player == "player_0":
+                factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
+
+            if player == "player_1":
+                factory_action = torch.stack([categorical.argmax() for categorical in factory_multi_categoricals])
         else:
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_action = robot_action.view(-1, robot_action.shape[-1]).T
