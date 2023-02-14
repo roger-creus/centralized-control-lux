@@ -98,7 +98,7 @@ if __name__ == "__main__":
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--load-every', type=int, default=15,
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
-    parser.add_argument('--pool-size', type=int, default=10,
+    parser.add_argument('--pool-size', type=int, default=5,
                             help="how many checkpoints to keep")                        
 
     args = parser.parse_args()

@@ -20,8 +20,6 @@ from luxai_s2.spaces.act_space import ActionsQueue
 SOME UTILITIES FOR THE HEURISTIC ENEMY
 """
 RESOURCE_MAPPING = {0:"ice", 1:"ore", 2:"water", 3:"metal"}
-PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
-
 
 def water_cost(factory, env):
     game_state = env.state
@@ -77,13 +75,14 @@ This custom env handles self-play and training of the bidder and placer.
 2) Every reset() call makes it to the normal game phase directly (queries the bidder and placer before resetting and trains them with a DQN-like algo and replay buffer)
 """
 class CustomLuxEnv(gym.Env):
-    def __init__(self, self_play=False, env_cfg = None):
+    def __init__(self, self_play=False, env_cfg = None, device = "cuda:0", PATH_AGENT_CHECKPOINTS = "agent_checkpoints"):
         # the tru env
         self.env_ = LuxAI_S2(env_cfg, verbose=False)
         
         self.self_play = self_play
 
-        self.device = "cuda:0"
+        self.device = device
+        self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints"
 
         # observation space
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 23), dtype=np.float64)
@@ -167,7 +166,7 @@ class CustomLuxEnv(gym.Env):
                 reward_now = 0
             else:
                 rewards = np.zeros(5)
-                weights = np.array([0.05, 0.05, 0.05, 0.05, 0.05])
+                weights = np.array([0.05, 0.01, 0.05, 0.01, 0.01])
 
                 lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
                 self.prev_lichen = reward["player_0"]
@@ -844,7 +843,10 @@ class CustomLuxEnv(gym.Env):
 
     def update_enemy_agent(self):
         print("updating my enemy agent!")
-        self.enemy_agent.load_checkpoint(PATH_AGENT_CHECKPOINTS)
+        try:
+            self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
+        except:
+            print(self.PATH_AGENT_CHECKPOINTS)
 
 
 def make_env(seed):
