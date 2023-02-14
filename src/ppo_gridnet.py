@@ -173,6 +173,9 @@ class CategoricalMasked(Categorical):
         p_log_p = self.logits * self.probs
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
+    
+    def argmax(self):
+        return torch.argmax(self.logits, dim=1)
 
 # Utility used in the CNNs of the Agent
 class Transpose(nn.Module):
@@ -356,14 +359,25 @@ class Agent(nn.Module):
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
-            robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+
+            if player == "player_0":
+                robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+
+            if player == "player_1":
+                robot_action = torch.stack([categorical.argmax() for categorical in robot_multi_categoricals])
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
-            factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
+
+            if player == "player_0":
+                factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
+
+            if player == "player_1":
+                factory_action = torch.stack([categorical.argmax() for categorical in factory_multi_categoricals])
+
         else:
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_action = robot_action.view(-1, robot_action.shape[-1]).T
