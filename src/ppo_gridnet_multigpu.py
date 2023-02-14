@@ -251,9 +251,12 @@ class Agent(nn.Module):
         """
 
         # we have a different actor for robots and factories with different action spaces
-        self.actor_robots = layer_init_normed(nn.Linear(256, self.mapsize * envs.single_action_space["robots"].nvec[1:].sum()), norm_dim=1, scale=0.1)
+        nvec_robots = envs.single_action_space["robots"].nvec[1:].sum()
+        nvec_factories = envs.single_action_space["factories"].nvec[1:].sum()
 
-        self.actor_factories = layer_init_normed(nn.Linear(256, self.mapsize * envs.single_action_space["factories"].nvec[1:].sum()), norm_dim=1, scale=0.1)
+        self.actor_robots = layer_init_normed(nn.Linear(256, self.mapsize * nvec_robots), norm_dim=1, scale=0.1)
+
+        self.actor_factories = layer_init_normed(nn.Linear(256, self.mapsize * nvec_factories), norm_dim=1, scale=0.1)
         
         # we only have one critic that outputs the value of a state
         self.critic = layer_init_normed(nn.Linear(256, 1), norm_dim=1, scale=0.1)
@@ -440,7 +443,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i, args.self_play) for i in range(args.num_envs)])
 
-    agent = Agent(envs).to(device)
+    agent = Agent().to(device)
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     
