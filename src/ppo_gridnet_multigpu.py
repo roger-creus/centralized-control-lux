@@ -89,6 +89,8 @@ def parse_args():
     parser.add_argument('--clip-vloss', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                           help='Toggles wheter or not to use a clipped loss for the value function, as per the paper.')
 
+    parser.add_argument('--save-path', type=str, default="outputs",
+                            help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")
     parser.add_argument('--save-every', type=int, default=100,
@@ -114,9 +116,9 @@ def init_jvm(jvmpath=None):
     jpype.startJVM(jpype.getDefaultJVMPath())
 
 # utility to create Vectorized Env
-def make_env(seed, idx, self_play):
+def make_env(seed, idx, self_play, device):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play)
+        env = CustomLuxEnv(self_play=self_play, device = device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = NormalizeObservation(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
@@ -325,8 +327,13 @@ class Agent(nn.Module):
             robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs, player)).to(device)
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
-            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
-            robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+            
+            if player == "player_0":
+                robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
+                robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+
+            if player == "player_1":
+                pass
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
@@ -400,9 +407,11 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     print(f"args.num_envs: {args.num_envs}, args.batch_size: {args.batch_size}, args.minibatch_size: {args.minibatch_size}")
     experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
+    
+    #PATH_AGENT_CHECKPOINTS = os.path.join(args.save_path, "checkpoints") 
+    PATH_AGENT_CHECKPOINTS =  "checkpoints"
     if local_rank == 0:
         if args.self_play:
-            PATH_AGENT_CHECKPOINTS = "agent_checkpoints"
             if not os.path.exists(PATH_AGENT_CHECKPOINTS):
                 os.makedirs(PATH_AGENT_CHECKPOINTS)
 
@@ -415,6 +424,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             wandb.tensorboard.patch(save=False)
             writer = SummaryWriter(f"/tmp/{experiment_name}")
+            writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % ('\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
             CHECKPOINT_FREQUENCY = 50
 
     # TRY NOT TO MODIFY: seeding
@@ -438,9 +448,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # env setup
     init_jvm()
 
-    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i, args.self_play) for i in range(args.num_envs)])
+    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i, args.self_play, device) for i in range(args.num_envs)])
 
-    agent = Agent(envs).to(device)
+    agent = Agent().to(device)
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     
@@ -586,9 +596,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     writer.add_scalar("charts/episode_winner", info['result'], global_step)
                     break
 
-        print(
-            f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}, agent.actor.weight.sum(): {agent.actor.weight.sum()}"
-        )
         
         # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
@@ -597,7 +604,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 advantages = torch.zeros_like(rewards).to(device)
                 lastgaelam = 0
                 for t in reversed(range(args.num_steps)):
-                    if t == args.num_steps - 1:
+                    if t == args.num_steps - 1: 
                         nextnonterminal = 1.0 - next_done
                         nextvalues = last_value
                     else:
@@ -702,18 +709,27 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
         if local_rank == 0:
-            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+            if update % args.save_every == 0:
+                agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+                num_models_saved += 1
+
+        if update % args.load_every == 0:
+            for i in range(len(envs.envs)):
+                envs.envs[i].update_enemy_agent()
+
+        if local_rank == 0:
+            # TRY NOT TO MODIFY: record rewards for plotting purposes
+            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)
+            writer.add_scalar("charts/update", update, global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy.mean().item(), global_step)
             writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-            writer.add_scalar("losses/explained_variance", explained_var, global_step)
+            if args.kle_stop or args.kle_rollback:
+                writer.add_scalar("debug/pg_stop_iter", i_epoch_pi, global_step)
+            writer.add_scalar("charts/sps", int(global_step / (time.time() - start_time)), global_step)
             print("SPS:", int(global_step / (time.time() - start_time)))
-            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     envs.close()
     if local_rank == 0:
