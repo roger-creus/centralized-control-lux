@@ -77,7 +77,7 @@ This custom env handles self-play and training of the bidder and placer.
 class CustomLuxEnv(gym.Env):
     def __init__(self, self_play=False, env_cfg = None, device = "cuda:0", PATH_AGENT_CHECKPOINTS = "agent_checkpoints"):
         # the tru env
-        self.env_ = LuxAI_S2(env_cfg, verbose=True)
+        self.env_ = LuxAI_S2(env_cfg, verbose=False)
         
         self.self_play = self_play
 
