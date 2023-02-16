@@ -211,8 +211,8 @@ class Agent(nn.Module):
         h, w, c = envs.single_observation_space.shape
         shape = (c, h, w)
         conv_seqs = []
-        chans = [32, 64, 64]
-        scale = 1 / np.sqrt(len(chans))  # Not fully sure about the logic behind this but its used in PPG code
+        chans = [32, 64, 128, 256]
+
         for out_channels in chans:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
@@ -328,11 +328,11 @@ class Agent(nn.Module):
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
             
-            if player == "player_0":
-                robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+            #if player == "player_0":
+            robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
 
-            if player == "player_1":
-                robot_action = torch.stack([categorical.argmax() for categorical in robot_multi_categoricals])
+            #if player == "player_1":
+            #   robot_action = torch.stack([categorical.argmax() for categorical in robot_multi_categoricals])
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
@@ -340,11 +340,11 @@ class Agent(nn.Module):
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
             
-            if player == "player_0":
-                factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
+            #if player == "player_0":
+            factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
 
-            if player == "player_1":
-                factory_action = torch.stack([categorical.argmax() for categorical in factory_multi_categoricals])
+            #if player == "player_1":
+            #factory_action = torch.stack([categorical.argmax() for categorical in factory_multi_categoricals])
         else:
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_action = robot_action.view(-1, robot_action.shape[-1]).T

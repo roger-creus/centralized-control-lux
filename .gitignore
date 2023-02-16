@@ -10,3 +10,6 @@ src/runs/*
 /src/wandb/*
 src/wandb/*
 wandb/*
+
+src/checkpoints/*
+/checkpoints/*
