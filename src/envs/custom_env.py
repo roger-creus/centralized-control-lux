@@ -125,7 +125,7 @@ class CustomLuxEnv(gym.Env):
         self.placer = None
         
         # reward definition
-        self.is_sparse_reward = True
+        self.is_sparse_reward = False
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0

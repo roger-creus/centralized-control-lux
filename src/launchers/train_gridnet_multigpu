@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --partition=lab-real                           # Ask for unkillable job
-#SBATCH --cpus-per-task=24                             # Ask for 6 CPUs
+#SBATCH --cpus-per-task=32                             # Ask for 6 CPUs
 #SBATCH --gres=gpu:4                                   # Ask for 8 GPU
 #SBATCH --mem=500G                                        # Ask for 10 GB of RAM
 #SBATCH --time=170:00:00                                   # The job will run for 3 hours
@@ -12,12 +12,11 @@ module load anaconda/3
 
 conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 
-
-export OMP_NUM_THREADS=3
+export OMP_NUM_THREADS=4
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-torchrun --standalone --nnodes 1 --nproc_per_node 8 ppo_gridnet_multigpu.py --gamma 0.999 --gae-lambda 0.95 --ent-coef 0 --prod-mode --num-envs 64 --num-steps 2048 --n-minibatch 256 --update-epochs 10 --seed 200 --device-ids 0 0 1 1 2 2 3 3 --save-every 15 --load-every 3 --save-path $SLURM_TMPDIR
+torchrun --standalone --nnodes 1 --nproc_per_node 8 ppo_gridnet_multigpu.py --gamma 0.99 --gae-lambda 0.95 --ent-coef 0 --prod-mode --num-envs 128 --num-steps 1024 --n-minibatch 256 --update-epochs 10 --seed 200 --device-ids 0 0 1 1 2 2 3 3 --save-every 15 --load-every 3 --save-path $SLURM_TMPDIR
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/

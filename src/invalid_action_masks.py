@@ -362,25 +362,40 @@ def get_robot_invalid_action_masks(envs, player):
                 can_transfer_center = False
                 action_mask[i,x,y,12] = 0
 
-            factory_up = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y - 1]
+            if unit.pos.y - 1 >= 0:
+                factory_up = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y - 1]
+            else:
+                factory_up = -1
             can_transfer_up = True
             if factory_up == -1:
                 can_transfer_up = False
                 action_mask[i,x,y,13] = 0
             
-            factory_right = game_state.board.factory_occupancy_map[unit.pos.x + 1][unit.pos.y]
+            if unit.pos.x + 1 <= 47:
+                factory_right = game_state.board.factory_occupancy_map[unit.pos.x + 1][unit.pos.y]
+            else:
+                factory_right = -1
+
             can_transfer_right = True
             if factory_right == -1:
                 can_transfer_right = False
                 action_mask[i,x,y,14] = 0
 
-            factory_down = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y + 1]
+            if unit.pos.y + 1 <= 47:
+                factory_down = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y + 1]
+            else:
+                factory_down = -1
+
             can_transfer_down = True
             if factory_down == -1:
                 can_transfer_down = False
                 action_mask[i,x,y,15] = 0
 
-            factory_left = game_state.board.factory_occupancy_map[unit.pos.x - 1][unit.pos.y]
+            if unit.pos.x - 1 >= 0:
+                factory_left = game_state.board.factory_occupancy_map[unit.pos.x - 1][unit.pos.y]
+            else:
+                factory_left = -1
+
             can_transfer_left = True
             if factory_left == -1:
                 can_transfer_left = False
@@ -389,7 +404,7 @@ def get_robot_invalid_action_masks(envs, player):
             if not can_transfer_left and not can_transfer_up and not can_transfer_down and not can_transfer_right and not can_transfer_center:
                 action_mask[i,x,y,3] = 0
 
-            ###### TRANSFER ACTION TYPE ######
+            ###### PICKUP DIG ACTION TYPE ######
             factory_there = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y]
 
             # if there is no factory on top of unit -> cannot pick up (no pick up amount [4 actions] and no pick up resource [5 actions])

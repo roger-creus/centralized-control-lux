@@ -211,7 +211,7 @@ class Agent(nn.Module):
         h, w, c = envs.single_observation_space.shape
         shape = (c, h, w)
         conv_seqs = []
-        chans = [32, 64, 128, 256]
+        chans = [32, 64, 128, 128]
 
         for out_channels in chans:
             conv_seq = ConvSequence(shape, out_channels)
