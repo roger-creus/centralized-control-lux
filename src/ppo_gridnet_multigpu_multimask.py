@@ -761,10 +761,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
                 num_models_saved += 1
 
-        if update % args.load_every == 0:
-            for i in range(len(envs.envs)):
-                envs.envs[i].update_enemy_agent()
-
         if local_rank == 0:
             # TRY NOT TO MODIFY: record rewards for plotting purposes
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]['lr'], global_step)

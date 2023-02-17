@@ -410,6 +410,9 @@ class CustomLuxEnv(gym.Env):
         return bids
 
     def reset(self):
+        # we now sample a new opponent at each game
+        self.update_enemy_agent()
+        
         observations = self.env_.reset()
         self.prev_lichen = 0
         self.num_factories = 0
@@ -958,9 +961,9 @@ class CustomLuxEnv(gym.Env):
         self.enemy_agent = agent
 
     def update_enemy_agent(self):
-        print("updating my enemy agent!")
         try:
             self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
+            self.enemy_agent.freeze_params()
         except:
             print(self.PATH_AGENT_CHECKPOINTS)
 
