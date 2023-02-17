@@ -39,7 +39,7 @@ def get_factory_invalid_action_masks(envs, player):
             if metal < 100 or current_power < 500:
                 action_mask[i, x, y, 3] = 0     
 
-            if water < water_cost(factory, env.env_):
+            if water -1 <= water_cost(factory, env.env_):
                 action_mask[i, x, y, 4] = 0     
 
     return action_mask

@@ -78,7 +78,7 @@ This custom env handles self-play and training of the bidder and placer.
 class CustomLuxEnv(gym.Env):
     def __init__(self, self_play=False, env_cfg = None, device = "cuda:0", PATH_AGENT_CHECKPOINTS = "agent_checkpoints"):
         # the tru env
-        self.env_ = LuxAI_S2(env_cfg, verbose=True)
+        self.env_ = LuxAI_S2(env_cfg, verbose=False)
         
         self.self_play = self_play
 
@@ -123,7 +123,7 @@ class CustomLuxEnv(gym.Env):
         self.placer = None
         
         # reward definition
-        self.is_sparse_reward = False
+        self.is_sparse_reward = True
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
@@ -160,11 +160,21 @@ class CustomLuxEnv(gym.Env):
         observations, reward, done, info = self.env_.step(actions)
 
         if reward["player_0"] == -1000:
-            reward_now = -10
+            if self.is_sparse_reward:
+                reward_now = -1
+            else:
+                reward_now = -10
+
             info["player_0"]["result"] = -1
+        
         elif reward["player_1"] == -1000:
+            if self.is_sparse_reward:
+                reward_now = 1
+            else:
+                reward_now = 10
             info["player_0"]["result"] = 1
-            reward_now = 10
+
+        
         else:
             if self.is_sparse_reward:
                 reward_now = 0
@@ -260,7 +270,7 @@ class CustomLuxEnv(gym.Env):
                 # Resources weights, we might want to weigh them differently. (Must sum to 1).
                 resources_weights = np.array([0.5, 0.5])
                 
-                print("Total Rewards: ", rewards, "    Total Metal:", total_metal, "Unit Ore: ", math.ceil(unit_ore/5)/5, "Total Water: ", total_water, "Unit Ice", math.ceil(unit_ice/4)/5)
+                #print("Total Rewards: ", rewards, "    Total Metal:", total_metal, "Unit Ore: ", math.ceil(unit_ore/5)/5, "Total Water: ", total_water, "Unit Ice", math.ceil(unit_ice/4)/5)
 
                 resources = np.array([metal_change, water_change])
                 rewards[5] = np.sum(resources * resources_weights)

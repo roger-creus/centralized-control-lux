@@ -349,7 +349,7 @@ class Agent(nn.Module):
             # get robot valid actions
             robot_invalid_action_masks_action_params = torch.tensor(get_robot_invalid_action_masks_action_params(envs, player, robot_action_type.view(-1, 48, 48))).to(device)
             robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1, robot_invalid_action_masks_action_params.shape[-1])
-            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params[:,1:], robots_nvec_tolist, dim=1)
+            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params, robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_act_params_split_logits, robot_split_invalid_action_masks_action_params)]
             robot_action_params = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
 
@@ -368,7 +368,7 @@ class Agent(nn.Module):
 
             robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1, robot_invalid_action_masks_action_params.shape[-1])
             robot_action_params = robot_action_params.view(-1, robot_action_params.shape[-1]).T
-            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params[:,1:], robots_nvec_tolist, dim=1)
+            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params, robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_act_params_split_logits, robot_split_invalid_action_masks_action_params)]
 
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
@@ -391,7 +391,7 @@ class Agent(nn.Module):
         robot_logprob_act_params = robot_logprob_act_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_entropy_act_params = robot_entropy_act_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_action_params = robot_action_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
-        robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1,  48 * 48, robots_nvec_sum + 1)
+        robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1,  48 * 48, robots_nvec_sum)
 
         factory_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(factory_action, factory_multi_categoricals)])
         factory_entropy = torch.stack([categorical.entropy() for categorical in factory_multi_categoricals])
@@ -507,7 +507,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     robot_invalid_action_type_shape = (mapsize, envs.single_action_space["robots"].nvec[1].sum() + 1)
 
     robot_action_params_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 2)
-    robot_invalid_action_params_shape = (mapsize, envs.single_action_space["robots"].nvec[2:].sum() + 1)
+    robot_invalid_action_params_shape = (mapsize, envs.single_action_space["robots"].nvec[2:].sum())
 
     factory_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
     factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum() + 1)
