@@ -288,7 +288,7 @@ class Agent(nn.Module):
         self.actor_factories = layer_init(nn.Linear(256, self.mapsize * nvec_factories), std=0.01)
         
         # we only have one critic that outputs the value of a state
-        self.critic = layer_init_normed(nn.Linear(256, 1), norm_dim=1, scale=0.1)
+        self.critic = layer_init(nn.Linear(256, 1), std=1)
 
     def save_checkpoint(self, idx, pool_size, path):
         ckpts = os.listdir(path)
@@ -348,13 +348,28 @@ class Agent(nn.Module):
         robot_grid_logits = robot_logits.view(-1, robots_nvec_sum)
         robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist , dim=1)
 
+        # first sample the action type and then mask all the parameters for types that are not from the selected one
+        robot_action_type = robot_split_logits[0]
+        for i in range(len(robot_split_logits) - 1):
+            robot_split_logits[i+1].requires_grad = False
+
+        robot_invalid_action_masks_action_types = torch.tensor(get_robot_invalid_action_masks_action_type(envs, player)).to(device)
+        robot_invalid_action_masks_action_types = robot_invalid_action_masks_action_types.view(-1, robot_invalid_action_masks_action_types.shape[-1])
+        robot_split_invalid_action_masks_types = torch.split(robot_invalid_action_masks_action_types[:,1:], envs.single_action_space["robots"].nvec[1].tolist(), dim=1)
+        robot_action_type_categorical = CategoricalMasked(logits=robot_action_type, masks=robot_split_invalid_action_masks_types[0])
+
         factory_logits = self.actor_factories(x)
         factory_grid_logits = factory_logits.view(-1, factories_nvec_sum)
         factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
         
         if robot_action is None and factory_action is None:
             # get robot valid actions
-            robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs, player)).to(device)
+            robot_action_type = robot_action_type_categorical.sample()
+            robot_action_type = robot_action_type.T.view(-1,48,48)
+        
+            embed()
+
+            robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks_action_params(envs, player, robot_action_type)).to(device)
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
