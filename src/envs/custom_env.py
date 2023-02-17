@@ -78,7 +78,7 @@ This custom env handles self-play and training of the bidder and placer.
 class CustomLuxEnv(gym.Env):
     def __init__(self, self_play=False, env_cfg = None, device = "cuda:0", PATH_AGENT_CHECKPOINTS = "agent_checkpoints"):
         # the tru env
-        self.env_ = LuxAI_S2(env_cfg, verbose=False)
+        self.env_ = LuxAI_S2(env_cfg, verbose=True)
         
         self.self_play = self_play
 
@@ -92,14 +92,12 @@ class CustomLuxEnv(gym.Env):
 
         # ROBOTS
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
-        # dim 1: action type [NOOP, move, transfer, pickup, dig, self-destruct, recharge-x] -- LENGTH 7
+        # dim 1: action type [NOOP, move, transfer, pickup, dig, self-destruct] -- LENGTH 6
         # dim 2: move direction [up, right, down, left] -- LENGTH 4
         # dim 3: transfer direction [center, up, right, down, left] -- LENGTH 5
         # dim 4: transfer amount [25%, 50%, 75%, 95%] -- LENGTH 4
         # dim 5: transfer material [power, ore, metal, ice , water] --LENGTH 5
-        # dim 6: pickup amount [25%, 50%, 75%, 95%] -- LENGTH 4
-        # dim 7: pickup material [power, ore, metal, ice , water] --LENGTH 5
-        # dim 8: recharge parameter [25%, 50%, 75%, 95%] -- LENGTH 4
+        # dim 6: pickup material [power, ore, metal, ice , water] --LENGTH 5
         
         # TODO
         # dim 9: recycle [0,1] -- LENGTH 2
@@ -111,7 +109,7 @@ class CustomLuxEnv(gym.Env):
         # dim 1: factory action [NOOP, build light robot, build heavy robot, grow lichen] -- LENGTH 4
         self.action_space = gym.spaces.Dict({
             'robots': gym.spaces.MultiDiscrete(
-                [(48 * 48), 7, 4, 5, 4, 5, 4, 5, 4]
+                [(48 * 48), 6, 4, 5, 4, 5, 5]
             ),
             'factories': gym.spaces.MultiDiscrete(
                 [(48 * 48), 4]
@@ -483,7 +481,7 @@ class CustomLuxEnv(gym.Env):
 
             # action[1] == 0 means NOOP
             if action[1] == 0:
-                continue
+                crafted_action = None
 
             elif action[1] == 1:
                 # action_type = MOVE
@@ -539,8 +537,24 @@ class CustomLuxEnv(gym.Env):
                 # action_type = PICKUP
                 crafted_action[0] = 2
                 # pickup resource
-                crafted_action[2] = action[7]
+                crafted_action[2] = action[6]
+                # fix pickup amount to 25% of available cargo
+                free_power_capacity = robot.battery_capacity - robot.power
+                power_amount = free_power_capacity * 0.25
+                
+                current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
+                free_resource_capacity = robot.cargo_space - current_cargo
+                resource_amount = free_resource_capacity * 0.25
 
+                if action[6] == 4:
+                    amount = power_amount
+                else:
+                    resource = RESOURCE_MAPPING[action[6]]
+                    amount = resource_amount
+
+                crafted_action[3] = amount
+
+                """
                 # pickup amount = 0.25
                 if action[6] == 0:
                     if action[7] == 4:
@@ -586,6 +600,7 @@ class CustomLuxEnv(gym.Env):
                     print("Invalid pickup amount action")
 
                 crafted_action[3] = amount
+                """
 
             elif action[1] == 4:
                 # action_type = DIG
@@ -595,51 +610,17 @@ class CustomLuxEnv(gym.Env):
                 # action_type = SELF-DESTRUCT
                 crafted_action[0] = 4
 
-            elif action[1] == 6:
-                # action_type = RECHARGE
-                crafted_action[0] = 5
-                
-                if action[8] == 0:
-                    crafted_action[3] = robot.battery_capacity * 0.25
-                elif action[8] == 1:
-                    crafted_action[3] = robot.battery_capacity * 0.5
-                elif action[8] == 2:
-                    crafted_action[3] = robot.battery_capacity * 0.75        
-                elif action[8] == 3:
-                    crafted_action[3] = robot.battery_capacity * 0.95        
-                else:
-                    print("Invalid recharge parameter action")
-
             else:
                 if action[1] != 0:
                     print("Unit action not implemented")
 
-            # TODO
-            """
-            if action[1] != 0:
-                # recycle actions
-                if action[9] == 0:
-                    crafted_action[4] = 0
-                elif action[9] == 1:
-                    crafted_action[4] = 1
-                else:
-                    print("invalid recycle action")
-
-                # repeat action
-                if action[10] == 0:
-                    crafted_action[5] = 1
-                elif action[10] == 1:
-                    crafted_action[5] = 3
-                elif action[10] == 2:
-                    crafted_action[5] = 6
-                else:
-                    print("Invalid action repeat action")
-            """
-            crafted_action[4] = 0
-            crafted_action[5] = 1
-
             # finally commit the action
-            commited_actions[player][robot.unit_id] = [np.array(crafted_action, dtype=int)]
+            if crafted_action is not None:
+                # N and repeat
+                crafted_action[4] = 0
+                crafted_action[5] = 1
+
+                commited_actions[player][robot.unit_id] = [np.array(crafted_action, dtype=int)]
 
         return commited_actions
 
@@ -824,7 +805,9 @@ class CustomLuxEnv(gym.Env):
     def enemy_step(self):
         with torch.no_grad():
             obs = torch.Tensor(self.current_enemy_obs).unsqueeze(0).to(self.device)
-            robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks = self.enemy_agent.get_action(obs, envs=self, player="player_1")
+            robot_action_type, robot_action_params, factory_action, _, _, robot_invalid_action_masks_action_types, robot_invalid_action_masks_action_params, factory_invalid_action_masks = self.enemy_agent.get_action(obs, envs=self, player="player_1")
+
+            robot_action = torch.cat([robot_action_type, robot_action_params], dim = 2)
 
             # the robot real action adds the source units
             robot_real_action = torch.cat([
@@ -837,8 +820,8 @@ class CustomLuxEnv(gym.Env):
             # lot of invalid actions at cells for which no source units exist, so the rest of 
             # the code removes these invalid actions to speed things up
             robot_real_action = robot_real_action.cpu().numpy()
-            robot_valid_actions = robot_real_action[robot_invalid_action_masks[:,:,0].bool().cpu().numpy()]
-            robot_valid_actions_counts = robot_invalid_action_masks[:,:,0].sum(1).long().cpu().numpy()
+            robot_valid_actions = robot_real_action[robot_invalid_action_masks_action_types[:,:,0].bool().cpu().numpy()]
+            robot_valid_actions_counts = robot_invalid_action_masks_action_types[:,:,0].sum(1).long().cpu().numpy()
             robot_java_valid_actions = []
             robot_valid_action_idx = 0
             for env_idx, robot_valid_action_count in enumerate(robot_valid_actions_counts):
