@@ -297,7 +297,7 @@ class CustomLuxEnv(gym.Env):
         area = 47
         # Used to store the values computed by the heuristic of the cells 
         values_array = np.zeros((48,48))
-        resources_array = observations[agent]["board"]["ice"] + observations[agent]["board"]["ore"]
+        resources_array = observations[agent]["board"]["ice"] #+ observations[agent]["board"]["ore"]
         # 2d locations of the resources
         resources_location = np.array(list(zip(*np.where(resources_array == 1))))
         for i in resources_location:
