@@ -83,7 +83,7 @@ class CustomLuxEnv(gym.Env):
         self.self_play = self_play
 
         self.device = device
-        self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints"
+        self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_dense"
         
         # observation space
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 23), dtype=np.float64)
@@ -123,7 +123,7 @@ class CustomLuxEnv(gym.Env):
         self.placer = None
         
         # reward definition
-        self.is_sparse_reward = True
+        self.is_sparse_reward = False
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
@@ -173,7 +173,6 @@ class CustomLuxEnv(gym.Env):
             else:
                 reward_now = 10
             info["player_0"]["result"] = 1
-
         
         else:
             if self.is_sparse_reward:
@@ -186,7 +185,7 @@ class CustomLuxEnv(gym.Env):
                 # dim 4: units that died (-)
                 # dim 5: total resource gain (+/-)
                 rewards = np.zeros(6)
-                weights = np.array([0.1, 0.05, 0.4, 0.05, 0.1, 0.3])
+                weights = np.array([0.05, 0.15, 5, 0.05, 0.15, 0.05])
 
                 lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
                 self.prev_lichen = reward["player_0"]
@@ -201,7 +200,7 @@ class CustomLuxEnv(gym.Env):
                 # Losing factory penalty
                 if num_factories - self.num_factories < 0:
                     factories_lost = num_factories - self.num_factories
-                    rewards[2] = factories_lost/6 #/self.num_factories
+                    rewards[2] = factories_lost #/self.num_factories
                 self.num_factories = num_factories
 
                 # Power threshold penalty
@@ -218,7 +217,7 @@ class CustomLuxEnv(gym.Env):
                 # Robot loss penalty
                 if num_units - self.num_units < 0:
                     units_lost = num_units - self.num_units
-                    rewards[4] = units_lost#/self.num_units
+                    rewards[4] = units_lost #/self.num_units
                 self.num_units = num_units
 
                 # Resources increase reward

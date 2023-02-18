@@ -348,11 +348,11 @@ def get_robot_invalid_action_masks_action_params(envs, player, action_types):
                     if water < 5:
                         action_mask[i, x, y, 17] = 0
 
-                    action_mask[0:4] = 0
-                    action_mask[18:] = 0
+                    action_mask[i, x, y, 0:4] = 0
+                    action_mask[i, x, y, 18:] = 0
 
                 elif action_type == 3:
-                    action_mask[18:] = 1
+                    action_mask[i, x, y, 18:] = 1
 
                     power, ore, metal, ice, water = unit.power, unit.cargo.ore, unit.cargo.metal, unit.cargo.ice, unit.cargo.water
                     total_cargo = ore + metal + ice + water
@@ -361,20 +361,20 @@ def get_robot_invalid_action_masks_action_params(envs, player, action_types):
 
                     # cannot pickup resources if full cargo
                     if total_cargo >= (0.9 * cargo_capacity):
-                         action_mask[19:] = 0    
+                         action_mask[i, x, y, 19:] = 0    
 
                     # cannot pickup power if full battery
                     if current_power >= (0.9 * unit.battery_capacity):
-                        action_mask[18] = 0
+                        action_mask[i, x, y, 18] = 0
 
-                    action_mask[0:18] = 0
+                    action_mask[i, x, y, 0:18] = 0
 
                 elif action_type == 4:
                     # digging was selected (so it wsnt ilegal), and there are no action params for digging so mask them all
-                    action_mask[:] = 0
+                    action_mask[i, x, y, :] = 0
                 elif action_type == 5:
                     # self-destruct was selected (so it wsnt ilegal), and there are no action params for self-destruct so mask them all
-                    action_mask[:] = 0
+                    action_mask[i, x, y, :] = 0
 
     return action_mask
 

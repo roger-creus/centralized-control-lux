@@ -442,7 +442,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     writer = None
     
     #PATH_AGENT_CHECKPOINTS = os.path.join(args.save_path, "checkpoints") 
-    PATH_AGENT_CHECKPOINTS =  "checkpoints"
+    PATH_AGENT_CHECKPOINTS =  "checkpoints_dense"
     if local_rank == 0:
         if args.self_play:
             if not os.path.exists(PATH_AGENT_CHECKPOINTS):
