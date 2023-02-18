@@ -166,7 +166,7 @@ class CategoricalMasked(Categorical):
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
         else:
             self.masks = masks.bool()
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+12, device=device))
+            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
     
     def entropy(self):
