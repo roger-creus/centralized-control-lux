@@ -223,7 +223,7 @@ class CustomLuxEnv(gym.Env):
                 # dim 4: units that died (-)
                 # dim 5: total resource gain (+/-)
                 rewards = np.zeros(6)
-                weights = np.array([0.25, 1, 5, 0.1, 0.5, 0.1])
+                weights = np.array([0.25, 1, 5, 0.01, 0.1, 0.01])
 
                 lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
                 self.prev_lichen = reward["player_0"]
@@ -363,7 +363,6 @@ class CustomLuxEnv(gym.Env):
         best_loc = np.argmax(overall_score)
         
         return np.unravel_index(best_loc, (48, 48))
-
 
 
     def placement_heuristic(self, observations, agent):

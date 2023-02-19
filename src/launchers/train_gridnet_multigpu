@@ -12,11 +12,11 @@ module load anaconda/3
 
 conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 
-export OMP_NUM_THREADS=4
+export OMP_NUM_THREADS=2
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-torchrun --standalone --nnodes 1 --nproc_per_node 8 ppo_gridnet_multigpu_multimask.py --prod-mode --num-envs 64 --num-steps 128 --n-minibatch 4 --update-epochs 4 --seed 200 --device-ids 0 0 1 1 2 2 3 3 --save-every 25 --save-path $SLURM_TMPDIR
+torchrun --standalone --nnodes 1 --nproc_per_node 16 ppo_gridnet_multigpu_multimask.py --prod-mode --num-envs 128 --num-steps 256 --ent-coef 0.05 --n-minibatch 4 --update-epochs 4 --seed 1999 --device-ids 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 --save-every 25 --save-path $SLURM_TMPDIR
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/
