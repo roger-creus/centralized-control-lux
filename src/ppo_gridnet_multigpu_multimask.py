@@ -17,7 +17,7 @@ import torch.optim as optim
 from distutils.util import strtobool
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-from gym.wrappers import TimeLimit, Monitor, NormalizeObservation
+from gym.wrappers import TimeLimit, Monitor, NormalizeObservation,  NormalizeReward
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 from IPython import embed
 
@@ -120,6 +120,7 @@ def make_env(seed, idx, self_play, device):
     def thunk():
         env = CustomLuxEnv(self_play=self_play, device = device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = NormalizeObservation(env)
+        env = NormalizeReward(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
