@@ -162,6 +162,7 @@ class CustomLuxEnv(gym.Env):
         
         # reward definition
         self.is_sparse_reward = False
+        self.is_water_reward = True
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
@@ -216,104 +217,127 @@ class CustomLuxEnv(gym.Env):
             if self.is_sparse_reward:
                 reward_now = 0
             else:
-                # dim 0: lichen reward (+)
-                # dim 1: factories with no water (-)
-                # dim 2: factories that died (-)
-                # dim 3: units with no power (-)
-                # dim 4: units that died (-)
-                # dim 5: total resource gain (+/-)
-                rewards = np.zeros(6)
-                weights = np.array([0.25, 1, 5, 0.01, 0.1, 0.01])
+                if self.is_water_reward:
+                    # This reward is meant to make the RL agent only look at the water gathered and maximize it, since its key to surviving
+                    # TODO: motivate growing lichen apart form generating water
 
-                lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
-                self.prev_lichen = reward["player_0"]
-                rewards[0] = lichen_reward
+                    num_factories = len(observations["player_0"]["factories"]["player_0"].keys())
+                    if num_factories - self.num_factories < 0:
+                        factories_lost = num_factories - self.num_factories
+                        reward_now = factories_lost * 30
+                    else:
+                        reward_now = 0
 
-                # Water threshold penalty
-                water_threshold = 15
-                num_factories = len(observations["player_0"]["factories"]["player_0"].keys())
-                factories_water_shortage = -sum([water_threshold-observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys() if observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] < water_threshold])
-                rewards[1] = factories_water_shortage / (water_threshold-1)
+                    factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_water_total = (factories_water + math.ceil(factories_ice/4)) / self.num_factories
 
-                # Losing factory penalty
-                if num_factories - self.num_factories < 0:
-                    factories_lost = num_factories - self.num_factories
-                    rewards[2] = factories_lost #/self.num_factories
-                self.num_factories = num_factories
+                    num_units = len(observations["player_0"]["units"]["player_0"].keys())
 
-                # Power threshold penalty
-                power_threshold_heavy = 450
-                power_threshold_light = 22.5
-                num_units = len(observations["player_0"]["units"]["player_0"].keys())
-                if num_units != 0:
-                    heavy_power = -len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="HEAVY" and observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold_heavy])
-                    light_power = -len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="LIGHT" and observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold_light])
-                    # unit_power_shortage = -sum([power_threshold-observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold])
-                    units_power = heavy_power + light_power
-                    rewards[3] = units_power #(num_units)
+                    if num_units != 0:
+                        unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()]) / 2
+                    else:
+                        unit_ice = 0
 
-                # Robot loss penalty
-                if num_units - self.num_units < 0:
-                    units_lost = num_units - self.num_units
-                    rewards[4] = units_lost #/self.num_units
-                self.num_units = num_units
+                    total_water = factories_water_total + unit_ice
 
-                # Resources increase reward
-                # Water
-                lichen_water_cost = math.ceil(reward["player_0"]/10)
-                
-                factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_water_total = factories_water + math.ceil(factories_ice/4) + num_factories
-                
-                # Total ice in cargo for each unit (Divided by a constant so that cargo in robots is less important than cargo in factories)
-                if num_units != 0:
-                    unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                    self.total_water = total_water
+                    self.num_units = num_units
+                    self.num_factories = num_factories
                 else:
-                    unit_ice = 0
+                    # dim 0: lichen reward (+)
+                    # dim 1: factories with no water (-)
+                    # dim 2: factories that died (-)
+                    # dim 3: units with no power (-)
+                    # dim 4: units that died (-)
+                    # dim 5: total resource gain (+/-)
+                    rewards = np.zeros(6)
+                    weights = np.array([0.25, 1, 5, 0.01, 0.1, 0.01])
 
-                total_water = lichen_water_cost + factories_water_total + math.ceil(unit_ice/4)/5
-                
-                # Metal
-                factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_ore = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ore"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_metal_total = factories_metal + math.ceil(factories_ore/5)
-                # Metal Value of robots
-                if num_units != 0:
-                    heavy_metal = len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="HEAVY"])*100
-                    light_metal = len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="LIGHT"])*10
-                    robots_metal_total = heavy_metal + light_metal
-                else:
-                    robots_metal_total = 0
-                
-                # Total ore in cargo for each unit (Divided by a constant so that cargo in robots is less important than cargo in factories)
-                if num_units != 0:
-                    unit_ore = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ore"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                else:
-                    unit_ore = 0
+                    lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
+                    self.prev_lichen = reward["player_0"]
+                    rewards[0] = lichen_reward
 
-                total_metal = factories_metal_total + robots_metal_total + math.ceil(unit_ore/5)/5
+                    # Water threshold penalty
+                    water_threshold = 15
+                    num_factories = len(observations["player_0"]["factories"]["player_0"].keys())
+                    factories_water_shortage = -sum([water_threshold-observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys() if observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] < water_threshold])
+                    rewards[1] = factories_water_shortage / (water_threshold-1)
 
-                # if this is the first step, initialize the total metal and total water of the player.
-                if observations["player_0"]["real_env_steps"] == 1:
+                    # Losing factory penalty
+                    if num_factories - self.num_factories < 0:
+                        factories_lost = num_factories - self.num_factories
+                        rewards[2] = factories_lost #/self.num_factories
+                    self.num_factories = num_factories
+
+                    # Power threshold penalty
+                    power_threshold_heavy = 450
+                    power_threshold_light = 22.5
+                    num_units = len(observations["player_0"]["units"]["player_0"].keys())
+                    if num_units != 0:
+                        heavy_power = -len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="HEAVY" and observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold_heavy])
+                        light_power = -len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="LIGHT" and observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold_light])
+                        # unit_power_shortage = -sum([power_threshold-observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["power"] < power_threshold])
+                        units_power = heavy_power + light_power
+                        rewards[3] = units_power #(num_units)
+
+                    # Robot loss penalty
+                    if num_units - self.num_units < 0:
+                        units_lost = num_units - self.num_units
+                        rewards[4] = units_lost #/self.num_units
+                    self.num_units = num_units
+
+                    # Resources increase reward
+                    # Water
+                    lichen_water_cost = math.ceil(reward["player_0"]/10)
+                    
+                    factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_water_total = factories_water + math.ceil(factories_ice/4) + num_factories
+                    
+                    # Total ice in cargo for each unit (Divided by a constant so that cargo in robots is less important than cargo in factories)
+                    if num_units != 0:
+                        unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                    else:
+                        unit_ice = 0
+
+                    total_water = lichen_water_cost + factories_water_total + math.ceil(unit_ice/4)/5
+                    
+                    # Metal
+                    factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_ore = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ore"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                    factories_metal_total = factories_metal + math.ceil(factories_ore/5)
+                    # Metal Value of robots
+                    if num_units != 0:
+                        heavy_metal = len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="HEAVY"])*100
+                        light_metal = len([observations["player_0"]["units"]["player_0"][f"{unit}"] for unit in observations["player_0"]["units"]["player_0"].keys() if observations["player_0"]["units"]["player_0"][f"{unit}"]["unit_type"]=="LIGHT"])*10
+                        robots_metal_total = heavy_metal + light_metal
+                    else:
+                        robots_metal_total = 0
+                    
+                    # Total ore in cargo for each unit (Divided by a constant so that cargo in robots is less important than cargo in factories)
+                    if num_units != 0:
+                        unit_ore = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ore"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                    else:
+                        unit_ore = 0
+
+                    total_metal = factories_metal_total + robots_metal_total + math.ceil(unit_ore/5)/5
+
+                    metal_change = total_metal - self.total_metal
+                    water_change = total_water - self.total_water
                     self.total_metal = total_metal
                     self.total_water = total_water
 
-                metal_change = total_metal - self.total_metal
-                water_change = total_water - self.total_water
-                self.total_metal = total_metal
-                self.total_water = total_water
+                    # Resources weights, we might want to weigh them differently. (Must sum to 1).
+                    resources_weights = np.array([0.5, 0.5])
+                    
+                    #print("Total Rewards: ", rewards, "    Total Metal:", total_metal, "Unit Ore: ", math.ceil(unit_ore/5)/5, "Total Water: ", total_water, "Unit Ice", math.ceil(unit_ice/4)/5)
 
-                # Resources weights, we might want to weigh them differently. (Must sum to 1).
-                resources_weights = np.array([0.5, 0.5])
-                
-                #print("Total Rewards: ", rewards, "    Total Metal:", total_metal, "Unit Ore: ", math.ceil(unit_ore/5)/5, "Total Water: ", total_water, "Unit Ice", math.ceil(unit_ice/4)/5)
+                    resources = np.array([metal_change, water_change])
+                    rewards[5] = np.sum(resources * resources_weights)
 
-                resources = np.array([metal_change, water_change])
-                rewards[5] = np.sum(resources * resources_weights)
-
-                reward_now = weights * rewards
-                reward_now = np.sum(reward_now)
+                    reward_now = weights * rewards
+                    reward_now = np.sum(reward_now)
 
         done =  done["player_0"]
 
@@ -410,7 +434,6 @@ class CustomLuxEnv(gym.Env):
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
-        self.total_water = 0
         self.total_metal = 0
 
         # TODO: handle enemy sampling
@@ -432,7 +455,6 @@ class CustomLuxEnv(gym.Env):
         # step into factory placement phase
         observations, _, _, _ = self.env_.step(actions)
 
-
         factory_amount = {"player_0" : 0, "player_1" : 0}
         for player in factory_amount.keys():
             factory_amount[player] = observations["player_0"]["teams"][player]["water"]/observations["player_0"]["teams"][player]["factories_to_place"]
@@ -449,6 +471,13 @@ class CustomLuxEnv(gym.Env):
                     action[agent] = dict()
             
             observations, _, _, _ = self.env_.step(action)
+
+        # start total_water and total_metal used in to compute rewards
+        factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+        self.total_water = factories_water
+        factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+        self.total_metal = factories_metal
+        self.num_factories = observations["player_0"]["board"]["factories_per_team"]
 
         # keep the current game state updated
         self.current_state = observations
