@@ -121,7 +121,7 @@ class CustomLuxEnv(gym.Env):
         self.self_play = self_play
 
         self.device = device
-        self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_dense"
+        self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints"
         
         # observation space
         self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 24), dtype=np.float64)
@@ -154,8 +154,6 @@ class CustomLuxEnv(gym.Env):
             ),
         })
 
-        # enemy agent is PyTorch model
-        self.enemy_agent = None
         # this env handles the training of these 2
         self.bidder = None
         self.placer = None
