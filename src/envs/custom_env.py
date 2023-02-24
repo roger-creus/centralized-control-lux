@@ -162,7 +162,7 @@ class CustomLuxEnv(gym.Env):
         
         # reward definition
         self.is_sparse_reward = False
-        self.is_water_reward = True
+        self.is_water_reward = False
         self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
@@ -220,7 +220,6 @@ class CustomLuxEnv(gym.Env):
                 if self.is_water_reward:
                     # This reward is meant to make the RL agent only look at the water gathered and maximize it, since its key to surviving
                     # TODO: motivate growing lichen apart form generating water
-
                     num_factories = len(observations["player_0"]["factories"]["player_0"].keys())
                     if num_factories - self.num_factories < 0:
                         factories_lost = num_factories - self.num_factories
@@ -428,7 +427,8 @@ class CustomLuxEnv(gym.Env):
 
     def reset(self):
         # we now sample a new opponent at each game
-        self.update_enemy_agent()
+        if self.self_play:
+            self.update_enemy_agent()
         
         observations = self.env_.reset()
         self.prev_lichen = 0

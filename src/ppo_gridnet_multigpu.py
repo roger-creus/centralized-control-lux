@@ -253,7 +253,6 @@ class Agent(nn.Module):
         nvec_factories = envs.single_action_space["factories"].nvec[1:].sum()
 
         self.actor_robots = layer_init(nn.Linear(256, self.mapsize * nvec_robots), std=0.01)
-
         self.actor_factories = layer_init(nn.Linear(256, self.mapsize * nvec_factories), std=0.01)
         
         # we only have one critic that outputs the value of a state
@@ -415,9 +414,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     #PATH_AGENT_CHECKPOINTS = os.path.join(args.save_path, "checkpoints") 
     PATH_AGENT_CHECKPOINTS =  "checkpoints"
     if local_rank == 0:
-        if args.self_play:
-            if not os.path.exists(PATH_AGENT_CHECKPOINTS):
-                os.makedirs(PATH_AGENT_CHECKPOINTS)
+        if not os.path.exists(PATH_AGENT_CHECKPOINTS):
+            os.makedirs(PATH_AGENT_CHECKPOINTS)
 
         # WandB Logging
         if args.prod_mode:
@@ -717,10 +715,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             if update % args.save_every == 0:
                 agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
                 num_models_saved += 1
-
-        if update % args.load_every == 0:
-            for i in range(len(envs.envs)):
-                envs.envs[i].update_enemy_agent()
 
         if local_rank == 0:
             # TRY NOT TO MODIFY: record rewards for plotting purposes
