@@ -17,7 +17,7 @@ import torch.optim as optim
 from distutils.util import strtobool
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-from gym.wrappers import TimeLimit, Monitor, NormalizeObservation
+from gym.wrappers import TimeLimit, Monitor, NormalizeObservation,  NormalizeReward
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 from IPython import embed
 
@@ -120,6 +120,7 @@ def make_env(seed, idx, self_play, device):
     def thunk():
         env = CustomLuxEnv(self_play=self_play, device = device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = NormalizeObservation(env)
+        #env = NormalizeReward(env)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -211,7 +212,7 @@ class Agent(nn.Module):
         h, w, c = envs.single_observation_space.shape
         shape = (c, h, w)
         conv_seqs = []
-        chans = [32, 64, 128, 128]
+        chans = [32, 64, 64]
 
         for out_channels in chans:
             conv_seq = ConvSequence(shape, out_channels)
@@ -249,10 +250,12 @@ class Agent(nn.Module):
         """
 
         # we have a different actor for robots and factories with different action spaces
-        nvec_robots = envs.single_action_space["robots"].nvec[1:].sum()
         nvec_factories = envs.single_action_space["factories"].nvec[1:].sum()
 
-        self.actor_robots = layer_init(nn.Linear(256, self.mapsize * nvec_robots), std=0.01)
+        # first we select action type and then the params with updated masks
+        self.actor_robots_action_type = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["robots"].nvec[1].sum()), std=0.01)
+        self.actor_robots_action_params = layer_init(nn.Linear(256, self.mapsize * envs.single_action_space["robots"].nvec[2:].sum()), std=0.01)
+
         self.actor_factories = layer_init(nn.Linear(256, self.mapsize * nvec_factories), std=0.01)
         
         # we only have one critic that outputs the value of a state
@@ -291,77 +294,105 @@ class Agent(nn.Module):
         out = self.network(x.permute((0, 3, 1, 2))) # "bhwc" -> "bchw"
         return out
 
-    def get_action(self, x, robot_action=None, factory_action=None, robot_invalid_action_masks=None, factory_invalid_action_masks=None, envs=None, player="player_0"):
+    def get_action(
+            self,
+            x,
+            robot_action_type=None,
+            robot_action_params=None,
+            factory_action=None,
+            robot_invalid_action_masks_action_types=None,
+            robot_invalid_action_masks_action_params=None, 
+            factory_invalid_action_masks=None,
+            envs=None,
+            player="player_0"
+        ):
+
         x = self.forward(x)
 
         # player_0 operates in VecEnv so needs to access the single_obs_space (and action)
         if player == "player_0":
-            robots_nvec = envs.single_action_space["robots"].nvec
-            robots_nvec_sum = envs.single_action_space["robots"].nvec[1:].sum()
-            robots_nvec_tolist = envs.single_action_space["robots"].nvec[1:].tolist()
-            factories_nvec = envs.single_action_space["factories"].nvec
-            factories_nvec_sum = envs.single_action_space["factories"].nvec[1:].sum()
-            factories_nvec_tolist = envs.single_action_space["factories"].nvec[1:].tolist()
-        
+            act_space = envs.single_action_space
+       
         # player_1 operates in a single custom env so there is no such thing as single_obs_space
         if player == "player_1":
-            robots_nvec = envs.action_space["robots"].nvec
-            robots_nvec_sum = envs.action_space["robots"].nvec[1:].sum()
-            robots_nvec_tolist = envs.action_space["robots"].nvec[1:].tolist()
-            factories_nvec = envs.action_space["factories"].nvec
-            factories_nvec_sum = envs.action_space["factories"].nvec[1:].sum()
-            factories_nvec_tolist = envs.action_space["factories"].nvec[1:].tolist()
+            act_space = envs.action_space
 
-        robot_logits = self.actor_robots(x)
-        robot_grid_logits = robot_logits.view(-1, robots_nvec_sum)
-        robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist , dim=1)
+        robots_nvec = act_space["robots"].nvec
+        robots_nvec_sum = act_space["robots"].nvec[2:].sum()
+        robots_nvec_tolist = act_space["robots"].nvec[2:].tolist()
+        factories_nvec = act_space["factories"].nvec
+        factories_nvec_sum = act_space["factories"].nvec[1:].sum()
+        factories_nvec_tolist = act_space["factories"].nvec[1:].tolist()
 
+        # get logits for robot act type
+        robot_act_type_logits = self.actor_robots_action_type(x)
+        robot_act_type_grid_logits = robot_act_type_logits.view(-1, act_space["robots"].nvec[1].sum())
+        robot_act_type_split_logits = torch.split(robot_act_type_grid_logits, act_space["robots"].nvec[1].tolist() , dim=1)
+        
+        # get logits for robot act params
+        robot_act_params_logits = self.actor_robots_action_params(x)
+        robot_act_params_grid_logits = robot_act_params_logits.view(-1, robots_nvec_sum)
+        robot_act_params_split_logits = torch.split(robot_act_params_grid_logits, robots_nvec_tolist , dim=1)
+
+        # get logits for factories
         factory_logits = self.actor_factories(x)
         factory_grid_logits = factory_logits.view(-1, factories_nvec_sum)
         factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
         
-        if robot_action is None and factory_action is None:
-            # get robot valid actions
-            robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs, player)).to(device)
-            robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
-            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
-            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
-            
-            #if player == "player_0":
-            robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+        if robot_action_type is None and robot_action_params is None and factory_action is None:
+            # sample a valid action type
+            robot_invalid_action_masks_action_types = torch.tensor(get_robot_invalid_action_masks_action_type(envs, player)).to(device)
+            robot_invalid_action_masks_action_types = robot_invalid_action_masks_action_types.view(-1, robot_invalid_action_masks_action_types.shape[-1])
+            robot_split_invalid_action_masks_action_types = torch.split(robot_invalid_action_masks_action_types[:,1:], act_space["robots"].nvec[1].tolist(), dim=1)
+            robot_act_type_categorical = CategoricalMasked(logits=robot_act_type_split_logits[0], masks=robot_split_invalid_action_masks_action_types[0])
+            robot_action_type = robot_act_type_categorical.sample()
 
-            #if player == "player_1":
-            #   robot_action = torch.stack([categorical.argmax() for categorical in robot_multi_categoricals])
+            # get robot valid actions
+            robot_invalid_action_masks_action_params = torch.tensor(get_robot_invalid_action_masks_action_params(envs, player, robot_action_type.view(-1, 48, 48))).to(device)
+            robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1, robot_invalid_action_masks_action_params.shape[-1])
+            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params, robots_nvec_tolist, dim=1)
+            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_act_params_split_logits, robot_split_invalid_action_masks_action_params)]
+            robot_action_params = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
 
             # get factory valid actions
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs, player)).to(device)
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
-            
-            #if player == "player_0":
             factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
 
-            #if player == "player_1":
-            #factory_action = torch.stack([categorical.argmax() for categorical in factory_multi_categoricals])
         else:
-            robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
-            robot_action = robot_action.view(-1, robot_action.shape[-1]).T
-            robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:,1:], robots_nvec_tolist, dim=1)
-            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
+            robot_invalid_action_masks_action_types = robot_invalid_action_masks_action_types.view(-1, robot_invalid_action_masks_action_types.shape[-1])
+            robot_action_type = robot_action_type.view(-1, robot_action_type.shape[-1]).T
+            robot_split_invalid_action_masks_action_types = torch.split(robot_invalid_action_masks_action_types[:,1:], act_space["robots"].nvec[1].tolist(), dim=1)
+            robot_act_type_categorical = CategoricalMasked(logits=robot_act_type_split_logits[0], masks=robot_split_invalid_action_masks_action_types[0])
+
+            robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1, robot_invalid_action_masks_action_params.shape[-1])
+            robot_action_params = robot_action_params.view(-1, robot_action_params.shape[-1]).T
+            robot_split_invalid_action_masks_action_params = torch.split(robot_invalid_action_masks_action_params, robots_nvec_tolist, dim=1)
+            robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_act_params_split_logits, robot_split_invalid_action_masks_action_params)]
 
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_action = factory_action.view(-1, factory_action.shape[-1]).T
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:,1:], factories_nvec_tolist, dim=1)
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
         
-        robot_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(robot_action, robot_multi_categoricals)])
-        robot_entropy = torch.stack([categorical.entropy() for categorical in robot_multi_categoricals])
-        robot_num_predicted_parameters = len(robots_nvec) - 1
-        robot_logprob = robot_logprob.T.view(-1, 48 * 48, robot_num_predicted_parameters)
-        robot_entropy = robot_entropy.T.view(-1, 48 * 48, robot_num_predicted_parameters)
-        robot_action = robot_action.T.view(-1, 48 * 48, robot_num_predicted_parameters)
-        robot_invalid_action_masks = robot_invalid_action_masks.view(-1,  48 * 48, robots_nvec_sum + 1)
+
+        robot_logprob_act_type = robot_act_type_categorical.log_prob(robot_action_type) 
+        robot_entropy_act_type = robot_act_type_categorical.entropy()
+        robot_num_predicted_parameters = 1
+        robot_logprob_act_type = robot_logprob_act_type.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_entropy_act_type= robot_entropy_act_type.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_action_type = robot_action_type.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_invalid_action_masks_action_types = robot_invalid_action_masks_action_types.view(-1,  48 * 48, act_space["robots"].nvec[1].sum() + 1)
+
+        robot_logprob_act_params = torch.stack([categorical.log_prob(a) for a, categorical in zip(robot_action_params, robot_multi_categoricals)])
+        robot_entropy_act_params = torch.stack([categorical.entropy() for categorical in robot_multi_categoricals])
+        robot_num_predicted_parameters = len(robots_nvec) - 2
+        robot_logprob_act_params = robot_logprob_act_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_entropy_act_params = robot_entropy_act_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_action_params = robot_action_params.T.view(-1, 48 * 48, robot_num_predicted_parameters)
+        robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.view(-1,  48 * 48, robots_nvec_sum)
 
         factory_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(factory_action, factory_multi_categoricals)])
         factory_entropy = torch.stack([categorical.entropy() for categorical in factory_multi_categoricals])
@@ -371,15 +402,15 @@ class Agent(nn.Module):
         factory_action = factory_action.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_invalid_action_masks = factory_invalid_action_masks.view(-1,  48 * 48, factories_nvec_sum + 1)
 
-        robot_logprob = robot_logprob.sum(1).sum(1)
+        robot_logprob = robot_logprob_act_type.sum(1).sum(1) + robot_logprob_act_params.sum(1).sum(1)
         factory_logprob = factory_logprob.sum(1).sum(1)
         logprob = robot_logprob + factory_logprob
 
-        robot_entropy = robot_entropy.sum(1).sum(1)
+        robot_entropy = robot_entropy_act_type.sum(1).sum(1) + robot_entropy_act_params.sum(1).sum(1)
         factory_entropy = factory_entropy.sum(1).sum(1)
         entropy = robot_entropy + factory_entropy
 
-        return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
+        return robot_action_type, robot_action_params, factory_action, logprob, entropy, robot_invalid_action_masks_action_types, robot_invalid_action_masks_action_params, factory_invalid_action_masks
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -412,10 +443,11 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     writer = None
     
     #PATH_AGENT_CHECKPOINTS = os.path.join(args.save_path, "checkpoints") 
-    PATH_AGENT_CHECKPOINTS =  "checkpoints"
+    PATH_AGENT_CHECKPOINTS =  "checkpoints_dense"
     if local_rank == 0:
-        if not os.path.exists(PATH_AGENT_CHECKPOINTS):
-            os.makedirs(PATH_AGENT_CHECKPOINTS)
+        if args.self_play:
+            if not os.path.exists(PATH_AGENT_CHECKPOINTS):
+                os.makedirs(PATH_AGENT_CHECKPOINTS)
 
         # WandB Logging
         if args.prod_mode:
@@ -472,15 +504,20 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # ALGO Logic: Storage for epoch data
     mapsize = 48*48
 
-    # TODO: why is there +1 in invalid action shape?
-    robot_action_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 1)
-    robot_invalid_action_shape = (mapsize, envs.single_action_space["robots"].nvec[1:].sum() + 1)
+    robot_action_type_space_shape = (mapsize, 1)
+    robot_invalid_action_type_shape = (mapsize, envs.single_action_space["robots"].nvec[1].sum() + 1)
+
+    robot_action_params_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 2)
+    robot_invalid_action_params_shape = (mapsize, envs.single_action_space["robots"].nvec[2:].sum())
 
     factory_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
     factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum() + 1)
 
-    robot_actions = torch.zeros((args.num_steps, args.num_envs) + robot_action_space_shape).to(device)
-    robot_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_shape).to(device)
+    robot_actions_types = torch.zeros((args.num_steps, args.num_envs) + robot_action_type_space_shape).to(device)
+    robot_invalid_action_masks_action_types = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_type_shape).to(device)
+
+    robot_actions_params = torch.zeros((args.num_steps, args.num_envs) + robot_action_params_space_shape).to(device)
+    robot_invalid_action_masks_action_params = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_params_shape).to(device)
 
     factory_actions = torch.zeros((args.num_steps, args.num_envs) + factory_action_space_shape).to(device)
     factory_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + factory_invalid_action_shape).to(device)
@@ -517,12 +554,16 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # ALGO LOGIC: put action logic here
             with torch.no_grad():
                 values[step] = agent.get_value(obs[step]).flatten()
-                robot_action, factory_action, logproba, _, robot_invalid_action_masks[step], factory_invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
+                
+                robot_action_type, robot_action_params, factory_action, logproba, _, robot_invalid_action_masks_action_types[step], robot_invalid_action_masks_action_params[step], factory_invalid_action_masks[step] = agent.get_action(obs[step], envs=envs)
 
-            robot_actions[step] = robot_action
+            robot_actions_types[step] = robot_action_type
+            robot_actions_params[step] = robot_action_params
             factory_actions[step] = factory_action
 
             logprobs[step] = logproba
+
+            robot_action = torch.cat([robot_action_type, robot_action_params], dim = 2)
 
             # the robot real action adds the source units
             robot_real_action = torch.cat([
@@ -535,8 +576,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # lot of invalid actions at cells for which no source units exist, so the rest of 
             # the code removes these invalid actions to speed things up
             robot_real_action = robot_real_action.cpu().numpy()
-            robot_valid_actions = robot_real_action[robot_invalid_action_masks[step][:,:,0].bool().cpu().numpy()]
-            robot_valid_actions_counts = robot_invalid_action_masks[step][:,:,0].sum(1).long().cpu().numpy()
+            robot_valid_actions = robot_real_action[robot_invalid_action_masks_action_types[step][:,:,0].bool().cpu().numpy()]
+            robot_valid_actions_counts = robot_invalid_action_masks_action_types[step][:,:,0].sum(1).long().cpu().numpy()
             robot_java_valid_actions = []
             robot_valid_action_idx = 0
             for env_idx, robot_valid_action_count in enumerate(robot_valid_actions_counts):
@@ -630,12 +671,14 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
-        b_robot_actions = robot_actions.reshape((-1,) + robot_action_space_shape)
+        b_robot_actions_types = robot_actions_types.reshape((-1,) + robot_action_type_space_shape)
+        b_robot_actions_params = robot_actions_params.reshape((-1,) + robot_action_params_space_shape)
         b_factory_actions = factory_actions.reshape((-1,) + factory_action_space_shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
-        b_robot_invalid_action_masks = robot_invalid_action_masks.reshape((-1,) + robot_invalid_action_shape)
+        b_robot_invalid_action_masks_action_types = robot_invalid_action_masks_action_types.reshape((-1,) + robot_invalid_action_type_shape)
+        b_robot_invalid_action_masks_action_params = robot_invalid_action_masks_action_params.reshape((-1,) + robot_invalid_action_params_shape)
         b_factory_invalid_action_masks = factory_invalid_action_masks.reshape((-1,) + factory_invalid_action_shape)
 
         # Optimizaing the policy and value network
@@ -650,14 +693,17 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
                 # raise
 
-                _, _, newlogproba, entropy, _, _ = agent.get_action(
+                _, _, _, newlogproba, entropy, _, _, _  = agent.get_action(
                     b_obs[minibatch_ind],
-                    b_robot_actions.long()[minibatch_ind],
+                    b_robot_actions_types.long()[minibatch_ind],
+                    b_robot_actions_params.long()[minibatch_ind],
                     b_factory_actions.long()[minibatch_ind],
-                    b_robot_invalid_action_masks[minibatch_ind],
+                    b_robot_invalid_action_masks_action_types[minibatch_ind],
+                    b_robot_invalid_action_masks_action_params[minibatch_ind],
                     b_factory_invalid_action_masks[minibatch_ind],
                     envs
                 )
+
                 ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
                 # Stats

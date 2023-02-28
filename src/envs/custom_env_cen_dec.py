@@ -1,4 +1,5 @@
 
+from itertools import chain
 import gym
 import numpy as np
 import luxai_s2.env
@@ -113,7 +114,7 @@ This custom env handles self-play and training of the bidder and placer.
 2) Every reset() call makes it to the normal game phase directly (queries the bidder and placer before resetting and trains them with a DQN-like algo and replay buffer)
 """
 
-class CustomLuxEnv(gym.Env):
+class CustomLuxEnvCenDec(gym.Env):
     def __init__(self, self_play=False, env_cfg = None, device = "cuda:0", PATH_AGENT_CHECKPOINTS = "agent_checkpoints"):
         # the tru env
         self.env_ = LuxAI_S2(env_cfg, verbose=True)
@@ -124,35 +125,24 @@ class CustomLuxEnv(gym.Env):
         self.PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints"
         
         # observation space
-        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 24), dtype=np.float64)
+        
+        # 24 gloabl features + 2 locals
+        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(26, 48, 48), dtype=np.float64)
         
         # keep running channel-wise statistics for normalisation each feature map independently
 
         # ROBOTS
-        # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
-        # dim 1: action type [NOOP, move, transfer, pickup, dig, self-destruct] -- LENGTH 6
-        # dim 2: move direction [up, right, down, left] -- LENGTH 4
-        # dim 3: transfer direction [center, up, right, down, left] -- LENGTH 5
-        # dim 4: transfer amount [25%, 50%, 75%, 95%] -- LENGTH 4
-        # dim 5: transfer material [power, ore, metal, ice , water] --LENGTH 5
-        # dim 6: pickup material [power, ore, metal, ice , water] --LENGTH 5
+        # dim 0: action type [NOOP, move, transfer, pickup, dig, self-destruct] -- LENGTH 6
+        # dim 1: move direction [up, right, down, left] -- LENGTH 4
+        # dim 2: transfer direction [center, up, right, down, left] -- LENGTH 5
+        # dim 3: transfer amount [25%, 50%, 75%, 95%] -- LENGTH 4
+        # dim 4: transfer resource [power, ore, metal, ice , water] --LENGTH 5
+        # dim 5: pickup resource [power, ore, metal, ice , water] --LENGTH 5        
+        # dim 6: factory action [NOOP, build light robot, build heavy robot, grow lichen] -- LENGTH 4
         
-        # TODO
-        # dim 9: recycle [0,1] -- LENGTH 2
-        # dim 10: N [1,3,6] (action repeat parameter) -- LENGTH 3
-        # TODO: when recycled, we also need to set the repeat value (right now we are recycling with repeat=1 which is a bit useless)
-
-        # FACTORIES
-        # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
-        # dim 1: factory action [NOOP, build light robot, build heavy robot, grow lichen] -- LENGTH 4
-        self.action_space = gym.spaces.Dict({
-            'robots': gym.spaces.MultiDiscrete(
-                [(48 * 48), 6, 4, 5, 4, 5, 5]
-            ),
-            'factories': gym.spaces.MultiDiscrete(
-                [(48 * 48), 4]
-            ),
-        })
+        self.action_space = gym.spaces.MultiDiscrete(
+            [6, 4, 5, 4, 5, 5, 4]
+        )
 
         # this env handles the training of these 2
         self.bidder = None
@@ -494,189 +484,108 @@ class CustomLuxEnv(gym.Env):
         """
         Transform the raw output actions into game actions that can be passed to the real env.
         """
-        factory_actions = action["factories"]
-        robot_actions = action["robots"]
-
         # we will fill this with the game actions
         commited_actions = {player : {}}
 
-        game_state = self.env_.state
+        my_units = self.current_state[player]["units"][player]
+        my_factories = self.current_state[player]["factories"][player]
 
-        for action in factory_actions:
-            x = action[0] // 48
-            y = action[0] % 48
-            pos = Position(np.array([x,y]))
+        for i, unit_id in enumerate(chain(my_units, my_factories)):
+            action_components = action[:, i]
+            if "unit" in unit_id:
+                robot = my_units[unit_id]
 
-            factory = game_state.board.get_factory_at(game_state, pos)
+                crafted_action = np.zeros(6)
 
-            # important action[1] == 0 is NOOP, so dont do anything
+                action_type = action_components[0]
 
-            if action[1] == 1:
-                # build light robot
-                commited_actions[player][factory.unit_id] = 0
-            elif action[1] == 2:
-                # build heavy robot
-                commited_actions[player][factory.unit_id] = 1
-            elif action[1] == 3:
-                # grow lichen
-                commited_actions[player][factory.unit_id] = 2
-            else:
-                if action[1] != 0:
-                    print("Factory action not implemented")
-
-        for action in robot_actions:
-            x = action[0] // 48
-            y = action[0] % 48
-            pos = Position(np.array([x,y]))
-
-            robot = game_state.board.get_units_at(pos)[0]
-
-            crafted_action = np.zeros(6)
-
-            # IMPORTANT: see \luxai_s2\spaces\act_space.py
-
-            # action[1] == 0 means NOOP
-            if action[1] == 0:
-                crafted_action = None
-
-            elif action[1] == 1:
-                # action_type = MOVE
-                crafted_action[0] = 0
-                crafted_action[1] = action[2] + 1
-            
-            elif action[1] == 2:
-                # action_type = TRANSFER
-                crafted_action[0] = 1
-                # transfer direction
-                crafted_action[1] = action[3]
-                # transfer resource
-                crafted_action[2] = action[5]
-
-                # transfer amount = 0.25
-                if action[4] == 0:
-                    if action[5] == 4:
-                        amount = robot.power * 0.25
-                    else:
-                        resource = RESOURCE_MAPPING[action[5]]
-                        amount = robot.cargo.state_dict()[resource] * 0.25
+                ##### MOVE ACTION ##### 
+                if action_type == 1:
+                    crafted_action[0] = 0
+                    crafted_action[1] = action_components[1] + 1
                 
-                # transfer amount = 0.5
-                elif action[4] == 1:
-                    if action[5] == 4:
-                        amount = robot.power * 0.5
+                ##### TRANSFER ACTION ##### 
+                elif action_type == 2:
+                    # action_type = TRANSFER
+                    crafted_action[0] = 1
+                    # transfer direction
+                    crafted_action[1] = action_components[2]
+                    # transfer resource
+                    crafted_action[2] = action_components[4]
+
+                    # transfer amount = 0.25
+                    if action_components[3] == 0:
+                        if action_components[4] == 4:
+                            amount = robot["power"] * 0.25
+                        else:
+                            resource = RESOURCE_MAPPING[action_components[4]]
+                            amount = robot["cargo"][resource] * 0.25
+                    
+                    # transfer amount = 0.5
+                    elif action_components[3] == 1:
+                        if action_components[4] == 4:
+                            amount = robot["power"] * 0.5
+                        else:
+                            resource = RESOURCE_MAPPING[action_components[4]]
+                            amount = robot["cargo"][resource] * 0.5
+                    
+                    # transfer amount = 0.75
+                    elif action_components[3] == 2:
+                        if action_components[4] == 4:
+                            amount = robot["power"] * 0.75
+                        else:
+                            resource = RESOURCE_MAPPING[action_components[4]]
+                            amount = robot["cargo"][resource] * 0.75
+                    
+                    # transfer amount = 0.95
+                    elif action_components[3] == 3:
+                        if action_components[4] == 4:
+                            amount = robot["power"] * 0.95
+                        else:
+                            resource = RESOURCE_MAPPING[action_components[4]]
+                            amount = robot["cargo"][resource] * 0.95
                     else:
-                        resource = RESOURCE_MAPPING[action[5]]
-                        amount = robot.cargo.state_dict()[resource] * 0.5
-                
-                # transfer amount = 0.75
-                elif action[4] == 2:
-                    if action[5] == 4:
-                        amount = robot.power * 0.75
+                        print("Invalid transfer amount action")
+
+                    crafted_action[3] = amount
+
+                ##### PICKUP ACTION ##### 
+                elif action_type == 3:
+                    # action_type = PICKUP
+                    crafted_action[0] = 2
+                    # pickup resource
+                    crafted_action[2] = action_components[5]
+                    # fix pickup amount to 25% of available cargo
+                    free_power_capacity = (150 if robot["unit_type"] == 'LIGHT' else 3000) - robot["power"]
+                    power_amount = free_power_capacity * 0.25
+                    
+                    current_cargo = sum(robot["cargo"].values())
+                    free_resource_capacity = (100 if robot["unit_type"] == 'LIGHT' else 1000) - current_cargo
+                    resource_amount = free_resource_capacity * 0.25
+
+                    if action_components[5] == 4:
+                        amount = power_amount
                     else:
-                        resource = RESOURCE_MAPPING[action[5]]
-                        amount = robot.cargo.state_dict()[resource] * 0.75
-                
-                # transfer amount = 0.95
-                elif action[4] == 3:
-                    if action[5] == 4:
-                        amount = robot.power * 0.95
-                    else:
-                        resource = RESOURCE_MAPPING[action[5]]
-                        amount = robot.cargo.state_dict()[resource] * 0.95
-                else:
-                    print("Invalid transfer amount action")
-                
-                # transfer amount
-                crafted_action[3] = amount
+                        resource = RESOURCE_MAPPING[action_components[5]]
+                        amount = resource_amount
 
-            elif action[1] == 3:
-                # action_type = PICKUP
-                crafted_action[0] = 2
-                # pickup resource
-                crafted_action[2] = action[6]
-                # fix pickup amount to 25% of available cargo
-                free_power_capacity = robot.battery_capacity - robot.power
-                power_amount = free_power_capacity * 0.25
-                
-                current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                free_resource_capacity = robot.cargo_space - current_cargo
-                resource_amount = free_resource_capacity * 0.25
+                    crafted_action[3] = amount
 
-                if action[6] == 4:
-                    amount = power_amount
-                else:
-                    resource = RESOURCE_MAPPING[action[6]]
-                    amount = resource_amount
+                elif action_type == 4:
+                    crafted_action[0] = 3
+                elif action_type == 5:
+                    crafted_action[0] = 4
 
-                crafted_action[3] = amount
+                if action_type != 0:
+                    crafted_action[4] = 0
+                    crafted_action[5] = 1
+                    commited_actions[player][unit_id] = [np.array(crafted_action, dtype=int)]               
 
-                """
-                # pickup amount = 0.25
-                if action[6] == 0:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.25
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.25
-                
-                # pickup amount = 0.5
-                elif action[6] == 1:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.5
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.5
+            elif "factory" in unit_id:
+                factory_action = action_components[-1]
 
-                elif action[6] == 2:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.75
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.75
-                
-                elif action[6] == 3:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.95
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.95
-                else:
-                    print("Invalid pickup amount action")
-
-                crafted_action[3] = amount
-                """
-
-            elif action[1] == 4:
-                # action_type = DIG
-                crafted_action[0] = 3
-
-            elif action[1] == 5:
-                # action_type = SELF-DESTRUCT
-                crafted_action[0] = 4
-
-            else:
-                if action[1] != 0:
-                    print("Unit action not implemented")
-
-            # finally commit the action
-            if crafted_action is not None:
-                # N and repeat
-                crafted_action[4] = 0
-                crafted_action[5] = 1
-
-                commited_actions[player][robot.unit_id] = [np.array(crafted_action, dtype=int)]
+                if factory_action != 0:
+                    commited_actions[player][unit_id] = factory_action - 1
 
         return commited_actions
 
@@ -869,8 +778,32 @@ class CustomLuxEnv(gym.Env):
             factory_power
         ]).astype("float64")
 
+        full_obs = []
+
+        for unit_id in my_units:
+            unit_factory_map = np.zeros((2, 48,48), dtype=float)
+
+            unit = my_units[unit_id]
+            unit_factory_map[0, unit["pos"][0], unit["pos"][1]] = 1
+            local_obs = np.vstack([obs, unit_factory_map])
+            full_obs.append(local_obs)
+
+        for factory_id in my_factories:
+            unit_factory_map = np.zeros((2, 48,48), dtype=float)
+
+            factory = my_factories[factory_id]
+            unit_factory_map[1, factory["pos"][0], factory["pos"][1]] = 1
+            local_obs = np.vstack([obs, unit_factory_map])
+            full_obs.append(local_obs)
+
+        if len(my_units) == 0 and len(my_factories) == 0:
+            local_obs = np.vstack([obs, np.zeros((2, 48,48), dtype=float)])
+            full_obs.append(local_obs)
+
+        obs = np.stack(full_obs)
+
         # transpose for channel last
-        return obs.transpose(1,2,0)
+        return obs
 
 
     def enemy_step(self):
@@ -1002,25 +935,3 @@ class CustomLuxEnv(gym.Env):
         except:
             print(self.PATH_AGENT_CHECKPOINTS)
 
-
-def make_env(seed):
-    def thunk():
-        env = CustomLuxEnv()
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
-        return env
-
-    return thunk
-
-if __name__ == "__main__":
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(3 + i) for i in range(8)]
-    )
-
-    obs = envs.reset()
-
-    action = dict()
-    action["factories"] = [10, 2]
-    action["robots"] = [15, 2, 1, 1, 1, 1, 1, 1, 1, 0]
