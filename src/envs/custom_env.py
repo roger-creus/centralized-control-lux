@@ -180,7 +180,7 @@ class CustomLuxEnv(gym.Env):
     # TODO: figure out raw model output action shape
     def step(self, action):
         # turn the raw player model outputs to game actions
-        player_action = self.act_(action, "player_0")  # returs {"player_0" : actions}
+        player_action = self.act_(action, "player_0")  # returns {"player_0" : actions}
 
         if self.self_play:
             # get enemy action (raw output model)

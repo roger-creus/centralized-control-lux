@@ -17,7 +17,7 @@ import torch.optim as optim
 from distutils.util import strtobool
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-from gym.wrappers import TimeLimit, Monitor, NormalizeObservation
+from gym.wrappers import TimeLimit, NormalizeObservation
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 from IPython import embed
 
