@@ -414,7 +414,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
 
-        PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_multi"
+        PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet"
         if not os.path.exists(PATH_AGENT_CHECKPOINTS):
             os.makedirs(PATH_AGENT_CHECKPOINTS)
 
@@ -693,7 +693,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # Evaluation!
             if update % args.eval_interval == 0:
                 agent.freeze_params()
-                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs)
+                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, PATH_AGENT_CHECKPOINTS)
                 envs_test.set_enemy_agent(agent)
                 envs_test = VideoWrapper(envs_test, update_freq=1)
                 mean_reward = []

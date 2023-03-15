@@ -336,7 +336,7 @@ class CustomLuxEnv(gym.Env):
 
     def reset(self, load_new_enemy=True):
         # we now sample a new opponent at each game
-        if self.self_play and load_new_enemy:
+        if self.self_play and load_new_enemy==True:
             self.update_enemy_agent()
         
         observations = self.env_.reset()
