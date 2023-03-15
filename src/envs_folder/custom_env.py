@@ -182,9 +182,9 @@ class CustomLuxEnv(gym.Env):
                         reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
 
                         new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        reward_now -= new_pickedup_water / 10
+                        reward_now -= new_pickedup_water / 100
                         new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        reward_now -= new_pickedup_metal / 20
+                        reward_now -= new_pickedup_metal / 100
                         new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
                         reward_now += new_pickedup_power / 300
                         new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
@@ -212,10 +212,10 @@ class CustomLuxEnv(gym.Env):
                         reward_now += new_lichen / 10
 
                         new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        reward_now -= new_pickedup_water / 10
+                        reward_now -= new_pickedup_water / 100
                         
                         new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        reward_now -= new_pickedup_metal / 20
+                        reward_now -= new_pickedup_metal / 100
 
                         new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
                         reward_now += new_pickedup_power / 300
