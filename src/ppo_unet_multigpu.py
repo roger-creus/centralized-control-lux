@@ -129,7 +129,7 @@ def init_jvm(jvmpath=None):
 # utility to create Vectorized env
 def make_env(seed, self_play, sparse_reward, simple_obs):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs)
+        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, PATH_AGENT_CHECKPOINTS=PATH_AGENT_CHECKPOINTS)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
