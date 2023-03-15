@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
@@ -159,67 +160,73 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
 
-class Transpose(nn.Module):
-    def __init__(self, permutation):
-        super().__init__()
-        self.permutation = permutation
-
-    def forward(self, x):
-        return x.permute(self.permutation)
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-class Encoder(nn.Module):
-    def __init__(self, input_channels, deep = False):
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
-        self._encoder = nn.Sequential(
-            Transpose((0, 3, 1, 2)),
-            layer_init(nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(128, 256, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(256, 256, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2),
-        )
-        #self.fc_enc = nn.Linear()
-
-    def forward(self, x):
-        x = self._encoder(x)
-        return x
-
-
-class Decoder(nn.Module):
-    def __init__(self, output_channels, deep = False):
-        super().__init__()
-
-        self.deconv = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(256, 256, 3, stride=2)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)),
-            nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(32, output_channels, 3, stride=2, padding=1, output_padding=1)),
-            Transpose((0, 2, 3, 1)),
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
         )
 
+    def forward(self, x):
+        return self.double_conv(x)
+
+class Down(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
 
     def forward(self, x):
-        return self.deconv(x)
+        return self.maxpool_conv(x)
 
+
+class Up(nn.Module):
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+
+        # if bilinear, use the normal convolutions to reduce the number of channels
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # input is CHW
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        # if you have padding issues, see
+        # https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
+        # https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
 
 class Agent(nn.Module):
     def __init__(self, mapsize=48 * 48, deep=False):
@@ -227,16 +234,31 @@ class Agent(nn.Module):
         self.mapsize = mapsize
         h, w, c = envs.single_observation_space.shape
 
-        self.encoder = Encoder(c, deep = deep)
+        self.inc = (DoubleConv(c, 32))
+        self.down1 = (Down(32, 64))
+        self.down2 = (Down(64, 128))
+        self.down3 = (Down(128, 256))
+        bilinear=False
+        factor = 2 if bilinear else 1
+        self.down4 = (Down(256, 512 // factor))
 
-        self.actor_robots = Decoder(29, deep = deep)
-        self.actor_factories = Decoder(4, deep = deep)
+        self.up1_r = (Up(512, 256 // factor, bilinear))
+        self.up2_r = (Up(256, 128 // factor, bilinear))
+        self.up3_r = (Up(128, 64 // factor, bilinear))
+        self.up4_r = (Up(64, 32, bilinear))
+        self.outc_r = (OutConv(32, 29))
+
+        self.up1_f = (Up(512, 256 // factor, bilinear))
+        self.up2_f = (Up(256, 128 // factor, bilinear))
+        self.up3_f = (Up(128, 64 // factor, bilinear))
+        self.up4_f = (Up(64, 32, bilinear))
+        self.outc_f = (OutConv(32, 4))
 
         self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(256, 128), std=1),
+            layer_init(nn.Linear(512 * 3 * 3, 512), std=1),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 1), std=1),
+            layer_init(nn.Linear(512, 1), std=1),
         )
     
     def save_checkpoint(self, idx, pool_size, path):
@@ -273,7 +295,29 @@ class Agent(nn.Module):
             param.requires_grad = True
 
     def forward(self, x):
-        return self.encoder(x)  # "bhwc" -> "bchw"
+        x = x.permute(0,3,1,2)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        return x1, x2, x3, x4, x5
+    
+    def forward_robots(self, x1, x2, x3, x4, x5):
+        x = self.up1_r(x5, x4)
+        x = self.up2_r(x, x3)
+        x = self.up3_r(x, x2)
+        x = self.up4_r(x, x1)
+        logits = self.outc_r(x)
+        return logits
+
+    def forward_factories(self, x1, x2, x3, x4, x5):
+        x = self.up1_f(x5, x4)
+        x = self.up2_f(x, x3)
+        x = self.up3_f(x, x2)
+        x = self.up4_f(x, x1)
+        logits = self.outc_f(x)
+        return logits
 
     def get_action(
             self,
@@ -305,13 +349,13 @@ class Agent(nn.Module):
         else:
             print(type(envs_))
 
-        x = self(obs)
+        x1, x2, x3, x4, x5 = self(obs)
         
-        robot_logits = self.actor_robots(x)
+        robot_logits = self.forward_robots(x1, x2, x3, x4, x5)
         robot_grid_logits = robot_logits.reshape(-1, robots_nvec_sum)
         robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist, dim=1)
 
-        factory_logits = self.actor_factories(x)
+        factory_logits = self.forward_factories(x1, x2, x3, x4, x5)
         factory_grid_logits = factory_logits.reshape(-1, factories_nvec_sum)
         factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
 
@@ -368,7 +412,8 @@ class Agent(nn.Module):
         return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
 
     def get_value(self, x):
-        return self.critic(self.forward(x))
+        _, _, _, x4, x5 = self.forward(x)
+        return self.critic(x5)
 
 
 if __name__ == "__main__":
