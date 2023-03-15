@@ -7,15 +7,28 @@ from luxai_s2.map.position import Position
 
 from IPython import embed
 
+import gym
+import numpy as np
+import torch
+import math
+import luxai_s2.unit as luxai_unit
+from luxai_s2.map.position import Position
+
+from utils import VideoWrapper
+
+from IPython import embed
+
 def get_factory_invalid_action_masks(envs, player):
-    if player == "player_0":
+    if type(envs) == gym.vector.sync_vector_env.SyncVectorEnv:
         action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["factories"].nvec[1:].sum() + 1))
         envs = envs.envs
 
-    if player == "player_1":
+    elif player == "player_1" or type(envs) == VideoWrapper:
         action_mask = np.zeros((1, 48, 48, envs.action_space["factories"].nvec[1:].sum() + 1))
         envs = [envs]
-
+    else:
+        print("error with type", type(envs))
+    
     for i in range(len(envs)):
         env = envs[i]
         game_state = env.env_.state
@@ -23,6 +36,12 @@ def get_factory_invalid_action_masks(envs, player):
         for unit_id in game_state.factories[player]:
             factory = game_state.factories[player][unit_id]
             x, y = factory.pos.x, factory.pos.y
+
+            # dim 0: factory_in_cell
+            # dim 1: NOOP
+            # dim 2: build light
+            # dim 3: build heavy
+            # dim 4: water lichen
 
             # start by assuming all actions are legal where there is a unit
             action_mask[i, x, y, :] = 1
@@ -47,13 +66,15 @@ def get_factory_invalid_action_masks(envs, player):
 
 def get_robot_invalid_action_masks(envs, player):
     # the returned mask will be of shape (num_envs, map_size, map_size, total_unit_actions)
-    if player == "player_0":
+    if type(envs) == gym.vector.sync_vector_env.SyncVectorEnv:
         action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["robots"].nvec[1:].sum() + 1))
         envs = envs.envs
 
-    if player == "player_1":
+    elif player == "player_1" or type(envs) == VideoWrapper:
         action_mask = np.zeros((1, 48, 48, envs.action_space["robots"].nvec[1:].sum() + 1))
         envs = [envs]
+    else:
+        print("error with type", type(envs))
 
     for i in range(len(envs)):
         env = envs[i]
@@ -67,7 +88,6 @@ def get_robot_invalid_action_masks(envs, player):
             action_mask[i, x, y, :] = 1
 
             current_power = unit.power
-
             update_queue_cost = action_queue_cost(unit, env.env_.env_cfg)
 
             # if not enough power to update action queue then we cannot do anything but NOOP
@@ -120,7 +140,7 @@ def get_robot_invalid_action_masks(envs, player):
                 can_move_left = False
 
             # if cannot move in any direction then simply cannot move
-            if not can_move_up and not can_move_down and not can_move_left and not can_move_right:
+            if can_move_up == False and can_move_down == False and can_move_left == False and can_move_right == False:
                 action_mask[i,x,y,2] = 0
 
             ###### TRANSFER ACTION TYPE ######
@@ -178,7 +198,7 @@ def get_robot_invalid_action_masks(envs, player):
                 can_transfer_left = False
                 action_mask[i,x,y,15] = 0
 
-            if not can_transfer_left and not can_transfer_up and not can_transfer_down and not can_transfer_right and not can_transfer_center:
+            if can_transfer_left == False and can_transfer_up == False and can_transfer_down == False and can_transfer_right == False and can_transfer_center == False:
                 action_mask[i,x,y,3] = 0
 
             ###### PICKUP DIG ACTION TYPE ######
@@ -196,6 +216,7 @@ def get_robot_invalid_action_masks(envs, player):
                 + game_state.board.rubble[unit.pos.x, unit.pos.y]
                 + game_state.board.lichen[unit.pos.x, unit.pos.y]
             )
+
             if board_sum == 0 or factory_there != -1:
                 action_mask[i, x, y, 5] = 0
 
@@ -208,14 +229,15 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i, x, y, 5] = 0
 
             # mask self destruct if no power (light robot)
-            if current_power <= 10 + update_queue_cost and unit.unit_type == luxai_unit.UnitType.LIGHT:
+            if current_power - update_queue_cost <= 10 and unit.unit_type == luxai_unit.UnitType.LIGHT:
                 action_mask[i, x, y, 6] = 0
 
             # mask self destruct if no power (heavyrobot)
-            if current_power <= 100 + update_queue_cost and unit.unit_type == luxai_unit.UnitType.HEAVY:
+            if current_power - update_queue_cost  <= 100 and unit.unit_type == luxai_unit.UnitType.HEAVY:
                 action_mask[i, x, y, 6] = 0
 
     return action_mask
+
 
 def get_robot_invalid_action_masks_action_type(envs, player):
     """

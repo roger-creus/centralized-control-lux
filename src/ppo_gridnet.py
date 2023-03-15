@@ -110,10 +110,9 @@ if __name__ == "__main__":
 args.batch_size = int(args.num_envs * args.num_steps)
 args.minibatch_size = int(args.batch_size // args.n_minibatch)
 
-if args.self_play:
-    PATH_AGENT_CHECKPOINTS = "checkpoints"
-    if not os.path.exists(PATH_AGENT_CHECKPOINTS):
-        os.makedirs(PATH_AGENT_CHECKPOINTS)
+PATH_AGENT_CHECKPOINTS = "checkpoints"
+if not os.path.exists(PATH_AGENT_CHECKPOINTS):
+    os.makedirs(PATH_AGENT_CHECKPOINTS)
 
 # TRY NOT TO MODIFY: setup the environment
 experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -147,7 +146,7 @@ torch.manual_seed(args.seed)
 torch.backends.cudnn.deterministic = args.torch_deterministic
 
 # utility to create Vectorized Env
-def make_env(seed, idx, self_play):
+def make_env(seed, self_play):
     def thunk():
         env = CustomLuxEnv(self_play=self_play)
         env = NormalizeObservation(env)
@@ -166,7 +165,7 @@ class CategoricalMasked(Categorical):
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
         else:
             self.masks = masks.bool()
-            logits = torch.where(self.masks, logits, torch.tensor(-1e+8, device=device))
+            logits = torch.where(self.masks, logits, torch.tensor(-1e+12, device=device))
             super(CategoricalMasked, self).__init__(probs, logits, validate_args)
     
     def entropy(self):
@@ -418,7 +417,7 @@ class Agent(nn.Module):
 
 init_jvm()
 
-envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, i, args.self_play) for i in range(args.num_envs)])
+envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play) for i in range(args.num_envs)])
 
 agent = Agent().to(device)
 optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -479,6 +478,12 @@ if args.prod_mode and wandb.run.resumed:
     agent.eval()
     print(f"resumed at update {starting_update}")
 
+
+print("Model's state_dict:")
+for param_tensor in agent.state_dict():
+    print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
+total_params = sum([param.nelement() for param in agent.parameters()])
+print("Model's total parameters:", total_params)
 
 for update in range(starting_update, num_updates+1):
     # Annealing the rate if instructed to do so.
@@ -639,6 +644,8 @@ for update in range(starting_update, num_updates+1):
                 envs
             )
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
+            if i_epoch_pi == 0:
+                embed()
 
             # Stats
             approx_kl = (b_logprobs[minibatch_ind] - newlogproba).mean()
