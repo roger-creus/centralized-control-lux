@@ -36,7 +36,7 @@ class CustomLuxEnv(gym.Env):
         # the true env
         #self.env_ = LuxAI_S2(env_cfg, verbose=0, collect_stats=True)
         env_id = "LuxAI_S2-v0"
-        self.env_ = gym.make(env_id, verbose=2, collect_stats=True)
+        self.env_ = gym.make(env_id, verbose=-1, collect_stats=True)
 
         self.self_play = self_play
         self.is_sparse_reward = sparse_reward
@@ -380,7 +380,7 @@ class CustomLuxEnv(gym.Env):
         # finally reset into the normal game
         self.current_player_obs = self.simple_obs_(observations, "player_0") if self.simple_obs == True else self.obs_(observations, "player_0")
         self.current_enemy_obs = self.simple_obs_(observations, "player_1") if self.simple_obs == True else self.obs_(observations, "player_1")
-
+        
         # important: return only from players perspective! Enemy is handled as part of the environment
         return self.current_player_obs
 
@@ -673,20 +673,20 @@ class CustomLuxEnv(gym.Env):
             x, y = factory["pos"][0], factory["pos"][1]
 
             factories[x][y] = 1
-            factory_ice[x][y] = factory["cargo"]["ice"] /= 100
-            factory_water[x][y] = factory["cargo"]["water"] /= 100
-            factory_metal[x][y] = factory["cargo"]["metal"] /= 100
-            factory_ore[x][y] = factory["cargo"]["ore"] /= 100
+            factory_ice[x][y] = factory["cargo"]["ice"] / 100
+            factory_water[x][y] = factory["cargo"]["water"] / 100
+            factory_metal[x][y] = factory["cargo"]["metal"] / 100
+            factory_ore[x][y] = factory["cargo"]["ore"] / 100
 
         for factory_id in enemy_factories:
             factory = enemy_factories[factory_id]
             x, y = factory["pos"][0], factory["pos"][1]
 
             factories[x][y] = -1
-            factory_ice[x][y] = - factory["cargo"]["ice"] /= 100
-            factory_water[x][y] = - factory["cargo"]["water"] /= 100
-            factory_metal[x][y] = - factory["cargo"]["metal"] /= 100
-            factory_ore[x][y] = - factory["cargo"]["ore"] /= 100
+            factory_ice[x][y] = - factory["cargo"]["ice"] / 100
+            factory_water[x][y] = - factory["cargo"]["water"] / 100
+            factory_metal[x][y] = - factory["cargo"]["metal"] / 100
+            factory_ore[x][y] = - factory["cargo"]["ore"] / 100
 
         # 30 channels of information!
         obs = np.stack([
@@ -840,199 +840,6 @@ class CustomLuxEnv(gym.Env):
 
         # transpose for channel last
         return obs.transpose(1,2,0)
-
-    def obs_(self, obs, player):
-        # TODO: add feature maps indicating current and future action queues
-        # TODO: add feature maps with forward sim to show how the future will be
-        # TODO: efficient normalization of features
-
-        # obs is a dict with keys "player_0" and "player_1". then  obs["player_0"]["units"] is again a dict with keys "player_0" and "player_1". weird
-        obs = obs[player]
-
-        opponent = ""
-        if player == "player_0":
-            opponent = "player_1"
-        else:
-            opponent = "player_0"
-
-        env_steps = obs["real_env_steps"] + (obs["board"]["factories_per_team"] * 2 + 1)
-        # get game stats
-        turn = np.tile(env_steps, (48,48)) #/ 999.       # max turns is 1000
-        turn_in_cycle = np.tile((env_steps % 50), (48,48)) #/ 49.
-        is_day_ = np.tile(int(is_day(self.env_.env_cfg, env_steps)), (48,48))
-
-        # get map data
-        rubble = np.array(obs["board"]["rubble"], dtype=float)
-        ore = np.array(obs["board"]["ore"], dtype=float)
-        ice = np.array(obs["board"]["ice"], dtype=float)
-        lichen = np.array(obs["board"]["lichen"], dtype=float)
-        #lichen_strains = np.array(obs["board"]["lichen_strains"], dtype=float)
-        valid_spawns = np.array(obs["board"]["valid_spawns_mask"], dtype=float)
-
-        #    normalization between 0 and 1 (we will try to keep negative values to indicate only enemy)
-        #rubble = rubble / self.max_lichen_and_rubble
-        #lichen = lichen / self.max_lichen_and_rubble
-        #ore = ore / self.max_lichen_and_rubble
-        #ice = ice / self.max_lichen_and_rubble
-        #lichen_strains = lichen_strains / 10    # important: 10 is a heuristic
-
-        # get units data
-        light_units = np.zeros((48,48), dtype=float)
-        heavy_units = np.zeros((48,48), dtype=float)
-        unit_power = np.zeros((48,48), dtype=float)
-        unit_ice = np.zeros((48,48), dtype=float)
-        unit_ore = np.zeros((48,48), dtype=float)
-        unit_water = np.zeros((48,48), dtype=float)
-        unit_metal = np.zeros((48,48), dtype=float)
-        unit_no_battery = np.zeros((48,48), dtype=float)
-        unit_full_cargo = np.zeros((48,48), dtype=float)
-        unit_on_factories = np.zeros((48,48), dtype=float)
-
-
-        my_units = obs["units"][player]
-        enemy_units = obs["units"][opponent]
-
-        # add friendly light and heavy units to 2 different maps
-        # important: normalization constants (different for light and heavies, or same for all?)
-        for unit_id in my_units:
-            unit = my_units[unit_id]
-
-
-            if unit["unit_type"] == 'LIGHT':
-                x, y = unit["pos"][0], unit["pos"][1]
-                factory_there = self.env_.state.board.factory_occupancy_map[x,y]
-                
-                light_units[x][y] = 1
-                unit_power[x][y] = unit["power"] #/ 150.
-                unit_ice[x][y] = unit["cargo"]["ice"] #/ 100.
-                unit_water[x][y] = unit["cargo"]["water"] #/ 100.
-                unit_metal[x][y] = unit["cargo"]["metal"] #/ 100.
-                unit_ore[x][y] = unit["cargo"]["ore"] #/ 100.
-                unit_no_battery[x][y] = 1 if unit["power"] < int(1) else 0
-                unit_full_cargo[x][y] = 1 if unit["cargo"] == int(100) else 0
-                unit_on_factories[x][y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
-                
-
-            if unit["unit_type"] == 'HEAVY':
-                x, y = unit["pos"][0], unit["pos"][1]
-                factory_there = self.env_.state.board.factory_occupancy_map[x,y]
-
-
-                heavy_units[x][y] = 1
-                unit_power[x][y] = unit["power"] #/ 3000.
-                unit_ice[x][y] = unit["cargo"]["ice"] #/ 1000.
-                unit_water[x][y] = unit["cargo"]["water"] #/ 1000.
-                unit_metal[x][y] = unit["cargo"]["metal"] #/ 1000.
-                unit_ore[x][y] = unit["cargo"]["ore"] #/ 1000.
-                unit_no_battery[x][y] = 1 if unit["power"] < int(10) else 0
-                unit_full_cargo[x][y] = 1 if unit["cargo"] == int(1000) else 0
-                unit_on_factories[x][y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
-
-        # add enemy light and heavy units to 2 different maps
-        # important, since the presence of an enemy unit is -1 in its map, its power and cargo should also be negative?
-        for unit_id in enemy_units:
-            unit = enemy_units[unit_id]
-            
-            if unit["unit_type"] == 'LIGHT':
-                x, y = unit["pos"][0], unit["pos"][1]
-                factory_there = self.env_.state.board.factory_occupancy_map[x,y]
-
-
-                light_units[x][y] = -1
-
-                unit_power[x][y] = - unit["power"] #/ 150.
-                unit_ice[x][y] = - unit["cargo"]["ice"] #/ 100.
-                unit_water[x][y] = - unit["cargo"]["water"] #/ 100.
-                unit_metal[x][y] = - unit["cargo"]["metal"] #/ 100.
-                unit_ore[x][y] = - unit["cargo"]["ore"] #/ 100.
-                unit_no_battery[x][y] = -1 if unit["power"] < int(1) else 0
-                unit_full_cargo[x][y] = -1 if unit["cargo"] == int(100) else 0
-                unit_on_factories[x][y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
-
-
-            if unit["unit_type"] == 'HEAVY':
-                x, y = unit["pos"][0], unit["pos"][1]
-                factory_there = self.env_.state.board.factory_occupancy_map[x,y]
-
-                heavy_units[x][y] = -1
-
-                unit_power[x][y] = - unit["power"] #/ 3000.
-                unit_ice[x][y] = - unit["cargo"]["ice"] #/ 1000.
-                unit_water[x][y] = - unit["cargo"]["water"] #/ 1000.
-                unit_metal[x][y] = - unit["cargo"]["metal"] #/ 1000.
-                unit_ore[x][y] = - unit["cargo"]["ore"] #/ 1000.
-                unit_no_battery[x][y] = -1 if unit["power"] < int(10) else 0
-                unit_full_cargo[x][y] = -1 if unit["cargo"] == int(1000) else 0
-                unit_on_factories[x][y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
-                
-        # get factories data
-        factories = np.zeros((48,48), dtype=float)
-        factory_power = np.zeros((48,48), dtype=float)
-        factory_ice = np.zeros((48,48), dtype=float)
-        factory_ore = np.zeros((48,48), dtype=float)
-        factory_water = np.zeros((48,48), dtype=float)
-        factory_metal = np.zeros((48,48), dtype=float)
-
-        my_factories = obs["factories"][player]
-        enemy_factories = obs["factories"][opponent]
-
-        # add factory positions and cargo. positive for my factories and negative otherwise
-        # important: as with units, do I need to make all enemy things negative? if presence map is already -1 where there is an enemy factory
-        # important: as capacity in factories is infinite, what normalization should I use? right now using same constant as for heavy robots
-        for factory_id in my_factories:
-            factory = my_factories[factory_id]
-            x, y = factory["pos"][0], factory["pos"][1]
-
-            factories[x][y] = 1
-            factory_power[x][y] = factory["power"] #/ 1000.
-            factory_ice[x][y] = factory["cargo"]["ice"] #/ 500.
-            factory_water[x][y] = factory["cargo"]["water"] #/ 500.
-            factory_metal[x][y] = factory["cargo"]["metal"] #/ 500.
-            factory_ore[x][y] = factory["cargo"]["ore"] #/ 500.
-
-        for factory_id in enemy_factories:
-            factory = enemy_factories[factory_id]
-            x, y = factory["pos"][0], factory["pos"][1]
-
-            factories[x][y] = - 1
-            factory_power[x][y] = - factory["power"] #/ 1000.
-            factory_ice[x][y] = - factory["cargo"]["ice"] #/ 500.
-            factory_water[x][y] = - factory["cargo"]["water"] #/ 500.
-            factory_metal[x][y] = - factory["cargo"]["metal"] #/ 500.
-            factory_ore[x][y] = - factory["cargo"]["ore"] #/ 500.
-
-        # 30 channels of information!
-        obs = np.stack([
-            turn,
-            turn_in_cycle,
-            is_day_,
-            rubble, 
-            ore, 
-            ice,
-            lichen, 
-            #lichen_strains, 
-            valid_spawns,
-            light_units,
-            heavy_units,
-            unit_ice,
-            unit_metal,
-            unit_water,
-            unit_ore,
-            unit_power,
-            unit_no_battery,
-            unit_full_cargo,
-            unit_on_factories,
-            factories,
-            factory_ice,
-            factory_metal,
-            factory_ore,
-            factory_water,
-            factory_power
-        ]).astype("float64")
-
-        # transpose for channel last
-        return obs.transpose(1,2,0)
-
 
     def enemy_step(self):
         with torch.no_grad():
