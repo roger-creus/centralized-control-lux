@@ -98,16 +98,18 @@ def parse_args():
         help="the id of the environment")
 
     # self-play specs
-    parser.add_argument('--save-path', type=str, default="outputs",
-                            help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")
     parser.add_argument('--save-every', type=int, default=25,
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
-    parser.add_argument('--pool-size', type=int, default=5,
+    parser.add_argument('--pool-size', type=int, default=10,
                             help="how many checkpoints to keep")
+
+    # env specs
     parser.add_argument('--sparse-reward', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                             help="weather to use sparse reward")
+    parser.add_argument('--simple-obs', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+                            help="weather to use binary feature inputs")
     parser.add_argument('--eval-interval', type=int, default=10, 
                             help="how many updates between eval")
     
@@ -123,11 +125,10 @@ def init_jvm(jvmpath=None):
         return
     jpype.startJVM(jpype.getDefaultJVMPath())
 
-
 # utility to create Vectorized env
-def make_env(seed, self_play, sparse_reward):
+def make_env(seed, self_play, sparse_reward, simple_obs):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward)
+        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -413,7 +414,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
 
-        PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-remake/src/checkpoints_multi"
+        PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_multi"
         if not os.path.exists(PATH_AGENT_CHECKPOINTS):
             os.makedirs(PATH_AGENT_CHECKPOINTS)
 
@@ -441,7 +442,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     # env setup
     init_jvm()
-    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward) for i in range(args.num_envs)])
+    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs) for i in range(args.num_envs)])
 
     agent = Agent(envs).to(device)
     torch.manual_seed(args.seed)
@@ -692,7 +693,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # Evaluation!
             if update % args.eval_interval == 0:
                 agent.freeze_params()
-                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward)
+                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs)
                 envs_test.set_enemy_agent(agent)
                 envs_test = VideoWrapper(envs_test, update_freq=1)
                 mean_reward = []

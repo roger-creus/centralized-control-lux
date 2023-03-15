@@ -24,8 +24,9 @@ This custom env handles self-play and training of the bidder and placer.
 class CustomLuxEnv(gym.Env):
     def __init__(
             self, 
-            self_play=False, 
-            sparse_reward=True,
+            self_play = False, 
+            sparse_reward = True,
+            simple_obs = True,
             env_cfg = None, 
             device = "cuda:0", 
             PATH_AGENT_CHECKPOINTS = "checkpoints"
@@ -39,6 +40,10 @@ class CustomLuxEnv(gym.Env):
 
         self.self_play = self_play
         self.is_sparse_reward = sparse_reward
+        self.is_survival_reward = True
+        
+        self.simple_obs = simple_obs
+
         self.prev_step_metrics = None
         self.enemy_agent = None
 
@@ -47,9 +52,10 @@ class CustomLuxEnv(gym.Env):
         self.PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS
         
         # observation space
-        self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 19), dtype=np.float64)
-        
-        # keep running channel-wise statistics for normalisation each feature map independently
+        if self.simple_obs:
+            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 19), dtype=np.float64)
+        else:
+            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 18), dtype=np.float64)
 
         # ROBOTS
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
@@ -77,26 +83,15 @@ class CustomLuxEnv(gym.Env):
             ),
         })
 
-        # this env handles the training of these 2
-        self.bidder = None
-        self.placer = None
-        
         # reward definition
-        self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
-        self.total_water = 0
-        self.total_metal = 0
-
-        self.test_step_count = 0
 
         # keeps updated versions of the player and enemy observations (preprocessed observations)
         self.current_player_obs = None
         self.current_enemy_obs = None
         # keep the current game observation
         self.current_state = None
-
-        self.max_lichen_and_rubble = 100
 
     # TODO: figure out raw model output action shape
     def step(self, action):
@@ -176,73 +171,67 @@ class CustomLuxEnv(gym.Env):
 
                 reward_now = 0
                 if self.prev_step_metrics is not None:
-                    ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
-                    water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                    reward_now += (ice_dug_this_step / 100) + water_produced_this_step
+                    # survival reward only motivates getting ice, ore and creating robots
+                    if self.is_survival_reward:
+                        ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
+                        water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
+                        reward_now += (ice_dug_this_step / 100) + water_produced_this_step
 
-                    print("water and ice reward=", (ice_dug_this_step / 100) + water_produced_this_step)
+                        ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
+                        metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
+                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
 
-                    ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
-                    metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                    reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step / 2)
-                    
-                    print("metal and ore reward=", ((ore_dug_this_step / 100) + metal_produced_this_step / 2))
+                        new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
+                        reward_now += (new_lights / 100)
+                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
+                        reward_now += (new_heavies / 100)
+                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
+                        reward_now -= (destroyed_lights / 100)
+                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
+                        reward_now -= (destroyed_heavies * 2) / 100
 
-                    new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
-                    reward_now += new_lichen / 100
+                    else:
+                        ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
+                        water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
+                        reward_now += (ice_dug_this_step / 100) + water_produced_this_step
 
-                    print("lichen reward=", new_lichen / 100)
+                        ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
+                        metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
+                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
 
-                    new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                    reward_now -= new_pickedup_water
-                    
-                    print("pickup water reward=", new_pickedup_water)
+                        new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
+                        reward_now += new_lichen / 10
 
-                    new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                    reward_now -= new_pickedup_metal / 2
+                        new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
+                        reward_now -= new_pickedup_water / 10
+                        
+                        new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
+                        reward_now -= new_pickedup_metal / 20
 
-                    print("pickup metal reward=", new_pickedup_metal / 2)
+                        new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
+                        reward_now += new_pickedup_power / 300
 
+                        new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                        reward_now -= new_consumed_water / 10
 
-                    new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                    reward_now += new_pickedup_power / 100
+                        new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
+                        reward_now += new_lights / 100
 
-                    print("pickup power reward=", new_pickedup_power / 100)
+                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
+                        reward_now += (new_heavies * 2) / 100
 
-                    new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                    reward_now -= new_consumed_water
+                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
+                        reward_now -= destroyed_lights / 100
 
-                    print("consumed water reward=", new_consumed_water)
+                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
+                        reward_now -= (destroyed_heavies * 2) / 100
 
+                        destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
+                        reward_now -= destroyed_factories * 10
 
-                    new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                    reward_now += new_lights
+                        power_used = metrics["power_used"] - self.prev_step_metrics["power_used"]
+                        reward_now -= power_used / 500
 
-                    print("new lights reward=", new_lights)
-
-                    new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                    reward_now += new_heavies * 2
-
-                    print("new hevaies reward=", new_heavies * 2)
-
-
-                    destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                    reward_now -= destroyed_lights
-
-                    destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                    reward_now -= destroyed_heavies * 2
-
-                    destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
-                    reward_now -= destroyed_factories * 10
-
-                    power_used = metrics["power_used"] - self.prev_step_metrics["power_used"]
-                    reward_now -= power_used / 300
-
-                    print("used power reard=", power_used / 300)
-
-
-                print("TOTAL_REWARD", reward_now)
-                print("-----------------------------------")
                 self.prev_step_metrics = copy.deepcopy(metrics)
 
         done =  done["player_0"]
@@ -255,8 +244,8 @@ class CustomLuxEnv(gym.Env):
         self.current_state = observations
     
         # update the current observations for both players and preprocess them into model input format
-        self.current_player_obs = self.simple_obs_(observations, "player_0")
-        self.current_enemy_obs = self.simple_obs_(observations, "player_1")
+        self.current_player_obs = self.simple_obs_(observations, "player_0") if self.simple_obs == True else self.obs_(observations, "player_0")
+        self.current_enemy_obs = self.simple_obs_(observations, "player_1")  if self.simple_obs == True else self.obs_(observations, "player_1")
 
         # important: only return from the point of view of player! enemy is handled as part of the environment
         return self.current_player_obs, reward_now, done, info["player_0"]
@@ -342,20 +331,11 @@ class CustomLuxEnv(gym.Env):
             self.update_enemy_agent()
         
         observations = self.env_.reset()
-        self.prev_lichen = 0
         self.num_factories = 0
         self.num_units = 0
-        self.total_metal = 0
-        self.total_ice = 0
         self.prev_step_metrics = None
 
-        # TODO: handle enemy sampling
-
         # TODO: update the current observations for both players and preprocess them into BIDDER input format
-        
-        # self.current_player_obs = self.obs_bid_phase_(observations, "player_0")
-        #self.current_enemy_obs = self.obs_bid_phase_(observations, "player_1")
-
         # TODO: get action from bidder model (preprocess into placer format)
 
         #Total resources that are available to bid
@@ -398,8 +378,8 @@ class CustomLuxEnv(gym.Env):
         self.current_state = observations
 
         # finally reset into the normal game
-        self.current_player_obs = self.simple_obs_(observations, "player_0")
-        self.current_enemy_obs = self.simple_obs_(observations, "player_1")
+        self.current_player_obs = self.simple_obs_(observations, "player_0") if self.simple_obs == True else self.obs_(observations, "player_0")
+        self.current_enemy_obs = self.simple_obs_(observations, "player_1") if self.simple_obs == True else self.obs_(observations, "player_1")
 
         # important: return only from players perspective! Enemy is handled as part of the environment
         return self.current_player_obs
@@ -596,6 +576,143 @@ class CustomLuxEnv(gym.Env):
                 commited_actions[player][robot.unit_id] = [np.array(crafted_action, dtype=int)]
 
         return commited_actions
+
+    def obs_(self, obs, player):
+        obs = obs[player]
+
+        opponent = ""
+        if player == "player_0":
+            opponent = "player_1"
+        else:
+            opponent = "player_0"
+
+        env_steps = obs["real_env_steps"] + (obs["board"]["factories_per_team"] * 2 + 1)
+        is_day_ = np.tile(int(is_day(self.env_.env_cfg, env_steps)), (48,48))
+
+        rubble = np.array(obs["board"]["rubble"], dtype=float) / 100
+        ore = np.array(obs["board"]["ore"], dtype=float) / 10
+        ice = np.array(obs["board"]["ice"], dtype=float) / 10
+        lichen = np.array(obs["board"]["lichen"], dtype=float) / 100
+
+        light_units = np.zeros((48,48), dtype=float)
+        heavy_units = np.zeros((48,48), dtype=float)
+        unit_power = np.zeros((48,48), dtype=float)
+        unit_ice = np.zeros((48,48), dtype=float)
+        unit_ore = np.zeros((48,48), dtype=float)
+        unit_water = np.zeros((48,48), dtype=float)
+        unit_metal = np.zeros((48,48), dtype=float)
+        unit_on_factories = np.zeros((48,48), dtype=float)
+
+        my_units = obs["units"][player]
+        enemy_units = obs["units"][opponent]
+
+        for unit_id in my_units:
+            unit = my_units[unit_id]
+            x, y = unit["pos"][0], unit["pos"][1]
+            factory_there = self.env_.state.board.factory_occupancy_map[x,y]
+
+            unit_ice[x][y] = unit["cargo"]["ice"] 
+            unit_water[x][y] = unit["cargo"]["water"] 
+            unit_metal[x][y] = unit["cargo"]["metal"]
+            unit_ore[x][y] = unit["cargo"]["ore"] 
+            unit_on_factories[x][y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
+            
+            if unit["unit_type"] == 'LIGHT':
+                light_units[x][y] = 1
+                unit_power[x][y] /= 150
+                unit_ice[x][y] /= 100
+                unit_water[x][y] /= 100
+                unit_metal[x][y] /= 100
+                unit_ore[x][y] /= 100
+            else:
+                heavy_units[x][y] = 1
+                unit_power[x][y] /= 3000
+                unit_ice[x][y] /= 1000
+                unit_water[x][y] /= 1000
+                unit_metal[x][y] /= 1000
+                unit_ore[x][y] /= 1000
+
+        for unit_id in enemy_units:
+            unit = enemy_units[unit_id]
+            x, y = unit["pos"][0], unit["pos"][1]
+            factory_there = self.env_.state.board.factory_occupancy_map[x,y]
+
+            unit_ice[x][y] = - unit["cargo"]["ice"] 
+            unit_water[x][y] = - unit["cargo"]["water"] 
+            unit_metal[x][y] = - unit["cargo"]["metal"]
+            unit_ore[x][y] = - unit["cargo"]["ore"] 
+            unit_on_factories[x][y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
+            
+            if unit["unit_type"] == 'LIGHT':
+                light_units[x][y] = -1
+                unit_power[x][y] /= 150
+                unit_ice[x][y] /= 100
+                unit_water[x][y] /= 100
+                unit_metal[x][y] /= 100
+                unit_ore[x][y] /= 100
+            else:
+                heavy_units[x][y] = -1
+                unit_power[x][y] /= 3000
+                unit_ice[x][y] /= 1000
+                unit_water[x][y] /= 1000
+                unit_metal[x][y] /= 1000
+                unit_ore[x][y] /= 1000
+
+        # get factories data
+        factories = np.zeros((48,48), dtype=float)
+        factory_ice = np.zeros((48,48), dtype=float)
+        factory_ore = np.zeros((48,48), dtype=float)
+        factory_water = np.zeros((48,48), dtype=float)
+        factory_metal = np.zeros((48,48), dtype=float)
+
+        my_factories = obs["factories"][player]
+        enemy_factories = obs["factories"][opponent]
+
+        for factory_id in my_factories:
+            factory = my_factories[factory_id]
+            x, y = factory["pos"][0], factory["pos"][1]
+
+            factories[x][y] = 1
+            factory_ice[x][y] = factory["cargo"]["ice"] /= 100
+            factory_water[x][y] = factory["cargo"]["water"] /= 100
+            factory_metal[x][y] = factory["cargo"]["metal"] /= 100
+            factory_ore[x][y] = factory["cargo"]["ore"] /= 100
+
+        for factory_id in enemy_factories:
+            factory = enemy_factories[factory_id]
+            x, y = factory["pos"][0], factory["pos"][1]
+
+            factories[x][y] = -1
+            factory_ice[x][y] = - factory["cargo"]["ice"] /= 100
+            factory_water[x][y] = - factory["cargo"]["water"] /= 100
+            factory_metal[x][y] = - factory["cargo"]["metal"] /= 100
+            factory_ore[x][y] = - factory["cargo"]["ore"] /= 100
+
+        # 30 channels of information!
+        obs = np.stack([
+            is_day_,
+            rubble, 
+            ore, 
+            ice,
+            lichen, 
+            light_units,
+            heavy_units,
+            unit_ice,
+            unit_metal,
+            unit_water,
+            unit_ore,
+            unit_power,
+            unit_on_factories,
+            factories,
+            factory_ice,
+            factory_metal,
+            factory_ore,
+            factory_water,
+        ]).astype("float64")
+
+        # transpose for channel last
+        return obs.transpose(1,2,0)
+
 
     def simple_obs_(self, obs, player):
         obs = obs[player]
@@ -1026,6 +1143,13 @@ class CustomLuxEnv(gym.Env):
 
     def set_enemy_agent(self, agent):
         self.enemy_agent = agent
+    
+    def set_sparse_reward(self):
+        self.is_sparse_reward = True
+
+    def set_dense_reward(self):
+        self.is_sparse_reward = False
+        self.is_survival_reward = False
 
     def update_enemy_agent(self):
         try:
