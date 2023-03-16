@@ -58,7 +58,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=10000000,
+    parser.add_argument("--total-timesteps", type=int, default=500000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -98,19 +98,19 @@ def parse_args():
         help="the id of the environment")
 
     # self-play specs
+    parser.add_argument('--save-path', type=str, default="outputs",
+                            help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")
     parser.add_argument('--save-every', type=int, default=25,
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
-    parser.add_argument('--pool-size', type=int, default=10,
+    parser.add_argument('--pool-size', type=int, default=5,
                             help="how many checkpoints to keep")
-
-    # env specs
     parser.add_argument('--sparse-reward', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                             help="weather to use sparse reward")
-    parser.add_argument('--simple-obs', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
-                            help="weather to use binary feature inputs")
     parser.add_argument('--eval-interval', type=int, default=10, 
+                            help="how many updates between eval")
+    parser.add_argument('--simple-obs', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                             help="how many updates between eval")
     
     args = parser.parse_args()
@@ -126,9 +126,9 @@ def init_jvm(jvmpath=None):
     jpype.startJVM(jpype.getDefaultJVMPath())
 
 # utility to create Vectorized env
-def make_env(seed, self_play, sparse_reward, simple_obs):
+def make_env(seed, self_play, sparse_reward, simple_obs, device):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, PATH_AGENT_CHECKPOINTS=PATH_AGENT_CHECKPOINTS)
+        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -173,7 +173,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 class Encoder(nn.Module):
-    def __init__(self, input_channels, deep = False):
+    def __init__(self, input_channels):
         super().__init__()
         self._encoder = nn.Sequential(
             Transpose((0, 3, 1, 2)),
@@ -188,24 +188,26 @@ class Encoder(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(128, 256, kernel_size=3, padding=1)),
             nn.MaxPool2d(3, stride=2, padding=1),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(256, 256, kernel_size=3, padding=1)),
-            nn.MaxPool2d(3, stride=2),
         )
-        #self.fc_enc = nn.Linear()
+        
+        self.fc_enc = nn.Sequential(
+            nn.Linear(256 * 3 * 3, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128)
+        )
 
     def forward(self, x):
         x = self._encoder(x)
+        x = x.reshape(-1, 256 * 3 * 3)
+        x = self.fc_enc(x)
         return x
 
 
 class Decoder(nn.Module):
-    def __init__(self, output_channels, deep = False):
+    def __init__(self, output_channels):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(256, 256, 3, stride=2)),
-            nn.ReLU(),
             layer_init(nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
             layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
@@ -216,25 +218,33 @@ class Decoder(nn.Module):
             Transpose((0, 2, 3, 1)),
         )
 
+        self.fc_dec = nn.Sequential(
+            nn.Linear(128, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256 * 3 * 3)
+        )
+
 
     def forward(self, x):
+        x = self.fc_dec(x)
+        x = x.view(-1, 256, 3, 3)
         return self.deconv(x)
 
 
 class Agent(nn.Module):
-    def __init__(self, mapsize=48 * 48, deep=False):
+    def __init__(self, mapsize=48 * 48):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         h, w, c = envs.single_observation_space.shape
 
-        self.encoder = Encoder(c, deep = deep)
+        self.encoder = Encoder(c)
 
-        self.actor_robots = Decoder(29, deep = deep)
-        self.actor_factories = Decoder(4, deep = deep)
+        self.actor_robots = Decoder(29)
+        self.actor_factories = Decoder(4)
 
         self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(256, 128), std=1),
+            layer_init(nn.Linear(128, 128), std=1),
             nn.ReLU(),
             layer_init(nn.Linear(128, 1), std=1),
         )
@@ -381,6 +391,10 @@ if __name__ == "__main__":
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+
+    # set the port number
+    #os.environ['MASTER_PORT'] = '29411'
+
     if world_size > 1:
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
@@ -395,6 +409,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     print(f"args.num_envs: {args.num_envs}, args.batch_size: {args.batch_size}, args.minibatch_size: {args.minibatch_size}")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
+
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet"
+
     if local_rank == 0:
         if args.track:
             import wandb
@@ -414,7 +431,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
 
-        PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet"
         if not os.path.exists(PATH_AGENT_CHECKPOINTS):
             os.makedirs(PATH_AGENT_CHECKPOINTS)
 
@@ -425,7 +441,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     np.random.seed(args.seed)
     torch.manual_seed(args.seed - local_rank)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-    torch.backends.cudnn.deterministic = True
+    #torch.backends.cudnn.deterministic = True
     #torch.backends.cudnn.benchmark = False
     #torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.allow_tf32 = False
@@ -442,21 +458,32 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     # env setup
     init_jvm()
-    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs) for i in range(args.num_envs)])
+
+    print("Thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+
+    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
     agent = Agent(envs).to(device)
+
+    if local_rank == 0:
+
+        # start self-play
+        num_models_saved = 0
+        agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+        num_models_saved += 1
+
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # start self-play
-    num_models_saved = 0
-    agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
-    num_models_saved += 1
+    # all threads will wait for jvm to be initialized and initial checkpoint to exist
+    if world_size > 1:
+        dist.barrier()
 
     for i in range(len(envs.envs)):
         enemy_agent = Agent().to(device)
         enemy_agent.freeze_params()
         envs.envs[i].set_enemy_agent(enemy_agent)
+
 
     # ALGO Logic: Storage for epoch data
     mapsize = 48 * 48
@@ -500,6 +527,18 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
+
+            # Reward curricula
+            if global_step > 100000000:
+                for i in range(len(envs.envs)):
+                    envs.envs[i].set_dense_reward()
+            
+            if global_step > 200000000:
+                for i in range(len(envs.envs)):
+                    envs.envs[i].set_sparse_reward()
+                    args.gamma = 1
+                    args.gae_lambda = 1
+
             obs[step] = next_obs
             dones[step] = next_done
 
@@ -693,7 +732,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # Evaluation!
             if update % args.eval_interval == 0:
                 agent.freeze_params()
-                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, PATH_AGENT_CHECKPOINTS)
+                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, device, PATH_AGENT_CHECKPOINTS)
                 envs_test.set_enemy_agent(agent)
                 envs_test = VideoWrapper(envs_test, update_freq=1)
                 mean_reward = []
@@ -764,6 +803,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 envs_test.send_wandb_video()
                 envs_test.close()
                 agent.unfreeze_params()    
+
+        if world_size > 1:
+            dist.barrier()
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)

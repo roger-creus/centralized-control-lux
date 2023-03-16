@@ -127,9 +127,9 @@ def init_jvm(jvmpath=None):
     jpype.startJVM(jpype.getDefaultJVMPath())
 
 # utility to create Vectorized env
-def make_env(seed, self_play, sparse_reward, simple_obs):
+def make_env(seed, self_play, sparse_reward, simple_obs, device):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, PATH_AGENT_CHECKPOINTS=PATH_AGENT_CHECKPOINTS)
+        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device = device, PATH_AGENT_CHECKPOINTS=PATH_AGENT_CHECKPOINTS)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -426,6 +426,10 @@ if __name__ == "__main__":
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
+    os.environ["MASTER_PORT"] = "29401"
+    print(torch.cuda.is_available())
+    print(torch.cuda.device_count())
+
     if world_size > 1:
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
@@ -440,6 +444,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     print(f"args.num_envs: {args.num_envs}, args.batch_size: {args.batch_size}, args.minibatch_size: {args.minibatch_size}")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_unet"
     if local_rank == 0:
         if args.track:
             import wandb
@@ -459,7 +464,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
         )
 
-        PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_unet"
         if not os.path.exists(PATH_AGENT_CHECKPOINTS):
             os.makedirs(PATH_AGENT_CHECKPOINTS)
 
@@ -476,6 +480,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     torch.backends.cudnn.allow_tf32 = False
 
     if len(args.device_ids) > 0:
+        print(args.device_ids)
         assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
         device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
     else:
@@ -487,16 +492,20 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     # env setup
     init_jvm()
-    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs) for i in range(args.num_envs)])
+    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
     agent = Agent(envs).to(device)
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # start self-play
-    num_models_saved = 0
-    agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
-    num_models_saved += 1
+    if local_rank == 0:
+        # start self-play
+        num_models_saved = 0
+        agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+        num_models_saved += 1
+
+    # all threads will wait for jvm to be initialized and initial checkpoint to exist
+    dist.barrier()
 
     for i in range(len(envs.envs)):
         enemy_agent = Agent().to(device)
@@ -738,7 +747,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # Evaluation!
             if update % args.eval_interval == 0:
                 agent.freeze_params()
-                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, PATH_AGENT_CHECKPOINTS)
+                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, device, PATH_AGENT_CHECKPOINTS)
                 envs_test.set_enemy_agent(agent)
                 envs_test = VideoWrapper(envs_test, update_freq=1)
                 mean_reward = []

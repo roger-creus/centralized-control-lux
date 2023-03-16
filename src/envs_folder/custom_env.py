@@ -47,8 +47,8 @@ class CustomLuxEnv(gym.Env):
         self.prev_step_metrics = None
         self.enemy_agent = None
 
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        #self.device = "cpu"
+        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         self.PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS
         
         # observation space
@@ -169,7 +169,6 @@ class CustomLuxEnv(gym.Env):
                 metrics["destroyed_heavies"] = stats["destroyed"]["HEAVY"]
                 metrics["destroyed_lights"] = stats["destroyed"]["LIGHT"]
 
-                reward_now = 0
                 if self.prev_step_metrics is not None:
                     # survival reward only motivates getting ice, ore and creating robots
                     if self.is_survival_reward:
@@ -182,13 +181,13 @@ class CustomLuxEnv(gym.Env):
                         reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
 
                         new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        reward_now -= new_pickedup_water / 100
+                        reward_now -= new_pickedup_water / 1000
                         new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        reward_now -= new_pickedup_metal / 100
+                        reward_now -= new_pickedup_metal / 1000
                         new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        reward_now += new_pickedup_power / 300
+                        reward_now += new_pickedup_power / 3000
                         new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        reward_now -= new_consumed_water / 10
+                        reward_now -= new_consumed_water / 1000
 
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
                         reward_now += (new_lights / 100)
@@ -242,6 +241,85 @@ class CustomLuxEnv(gym.Env):
                         reward_now -= power_used / 500
 
                 self.prev_step_metrics = copy.deepcopy(metrics)
+                """
+
+                # lichen change
+                lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
+                reward_now += lichen_reward
+                self.prev_lichen = reward["player_0"]
+
+                # lost factories
+                if num_factories - self.num_factories < 0:
+                    factories_lost = num_factories - self.num_factories
+                    reward_now -= factories_lost
+                self.num_factories = num_factories
+
+                # lost units
+                num_units = len(observations["player_0"]["units"]["player_0"].keys())
+                units_change = (num_units - self.num_units) / 100
+                reward_now += units_change
+                self.num_units = num_units
+
+                # ice in factories
+                factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                 
+                # ice in robots
+                if num_units != 0:
+                    unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                    unit_water = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["water"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                else:
+                    unit_ice = 0
+
+                # metal in factories
+                factories_ore = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ore"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+                factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
+
+                # ore in robots
+                if num_units != 0:
+                    unit_ore = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ore"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                    unit_metal = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["metal"] for unit in observations["player_0"]["units"]["player_0"].keys()])
+                else:
+                    unit_ore = 0
+
+                factories_ore_change = factories_ore - self.factories_ore
+                factories_ice_change = factories_ice - self.factories_ice
+                factories_water_change = factories_water - self.factories_water
+                factories_metal_change = factories_metal - self.factories_metal
+
+                units_ice_change = unit_ice - self.unit_ice
+                units_ore_change = unit_ore - self.unit_ore
+                units_water_change = unit_water - self.unit_water
+                units_metal_change = unit_metal - self.unit_metal
+
+                self.factories_ore = factories_ore
+                self.factories_ice = factories_ice
+                self.factories_water = factories_water
+                self.factories_metal = factories_metal
+
+                # if factories have new ice its good!
+                if factories_ice_change > 0:
+                    reward_now += factories_ice_change
+                else:
+                    # if factories have less ice, its still good if they refined it
+                    # but its not good if someone picked it up
+                    if factories_water_change < 0:
+                        reward_now += factories_ice_change
+
+                # if factories have new ore its good!
+                if factories_ore_change > 0:
+                    reward_now += factories_ore_change
+                else:
+                    # if factories have less ice, its still good if they refined it
+                    # but its not good if someone picked it up
+                    if factories_metal_change < 0:
+                        reward_now += factories_ice_change
+
+                reward_now += factories_ore_change / 2
+
+                reward_now += units_ice_change / 4
+                reward_now += units_ore_change / 8
+                """
 
         done =  done["player_0"]
 

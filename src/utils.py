@@ -4,8 +4,8 @@ import torch
 import wandb
 from envs_folder.custom_env import CustomLuxEnv
 
-def make_eval_env(seed, self_play, sparse_reward, simple_obs, PATH_AGENT_CHECKPOINTS):
-    env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
+def make_eval_env(seed, self_play, sparse_reward, simple_obs, device, PATH_AGENT_CHECKPOINTS):
+    env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device = device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
     env = gym.wrappers.RecordEpisodeStatistics(env)
     env.seed(seed)
     env.action_space.seed(seed)

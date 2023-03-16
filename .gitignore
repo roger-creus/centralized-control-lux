@@ -13,3 +13,12 @@ wandb/*
 
 src/checkpoints/*
 /checkpoints/*
+
+src/checkpoints_gridnet/*
+/checkpoints_gridnet/*
+
+src/checkpoints_unet/*
+/checkpoints_unet/*
+
+*.pt
+/*.pt
