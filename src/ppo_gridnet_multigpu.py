@@ -239,7 +239,7 @@ class Agent(nn.Module):
 
         self.encoder = Encoder(c)
 
-        self.actor_robots = Decoder(29)
+        self.actor_robots = Decoder(22)
         self.actor_factories = Decoder(4)
 
         self.critic = nn.Sequential(
