@@ -179,15 +179,15 @@ class CustomLuxEnv(gym.Env):
                         ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                         metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
                         reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
-                        
-                        # new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        # reward_now -= new_pickedup_water / 1000
-                        # new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        # reward_now -= new_pickedup_metal / 1000
-                        # new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        # reward_now += new_pickedup_power / 3000
-                        # new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        # reward_now -= new_consumed_water / 1000
+
+                        new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
+                        reward_now -= new_pickedup_water / 1000
+                        new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
+                        reward_now -= new_pickedup_metal / 1000
+                        new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
+                        reward_now += new_pickedup_power / 3000
+                        new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                        reward_now -= new_consumed_water / 1000
 
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
                         reward_now += new_lights / 500
@@ -205,7 +205,7 @@ class CustomLuxEnv(gym.Env):
 
                         ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                         metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
+                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 1.5
 
                         new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
                         reward_now += new_lichen / 10
@@ -346,22 +346,22 @@ class CustomLuxEnv(gym.Env):
         ORE_WEIGHTS = np.array([1, 0.5, 0.33, 0.25])
         weigthed_ore_dist = np.sum(np.array(ore_distances) * ORE_WEIGHTS[:, np.newaxis, np.newaxis], axis=0)
 
-        ICE_PREFERENCE = 5 # if you want to make ore more important, change to 0.3 for example
+        ICE_PREFERENCE = np.random.uniform(2,4) # if you want to make ore more important, change to 0.3 for example
 
         combined_resource_score = (weigthed_ice_dist * ICE_PREFERENCE + weigthed_ore_dist)
         combined_resource_score = (np.max(combined_resource_score) - combined_resource_score) * observation[agent]["board"]["valid_spawns_mask"]
 
-        """
-        low_rubble = (rubble<25)
-        low_rubble_scores = np.zeros_like(low_rubble, dtype=float)
+        if self.is_sparse_reward:
+            low_rubble = (rubble<25)
+            low_rubble_scores = np.zeros_like(low_rubble, dtype=float)
 
-        for i in range(low_rubble.shape[0]):
-            for j in range(low_rubble.shape[1]):
-                low_rubble_scores[i,j] = count_region_cells(low_rubble, (i,j), min_dist=0, max_dist=8, exponent=0.9)
+            for i in range(low_rubble.shape[0]):
+                for j in range(low_rubble.shape[1]):
+                    low_rubble_scores[i,j] = count_region_cells(low_rubble, (i,j), min_dist=0, max_dist=8, exponent=0.9)
 
-        overall_score = (low_rubble_scores*2 + combined_resource_score ) * observation[agent]["board"]["valid_spawns_mask"]
-        """
-        overall_score = (combined_resource_score) * observation[agent]["board"]["valid_spawns_mask"]
+            overall_score = (low_rubble_scores*2 + combined_resource_score ) * observation[agent]["board"]["valid_spawns_mask"]
+        else:
+            overall_score = (combined_resource_score) * observation[agent]["board"]["valid_spawns_mask"]
 
         best_loc = np.argmax(overall_score)
         
@@ -535,9 +535,18 @@ class CustomLuxEnv(gym.Env):
                     crafted_action[2] = 4
                 else:
                     print("incorrect transfer resource")
+                if action[5] == 0:
+                    crafted_action[2] = 0
+                elif action[5] == 1:
+                    crafted_action[2] = 1
+                elif action[5] == 2:
+                    crafted_action[2] = 4
+                else:
+                    print("incorrect transfer resource")
 
                 # transfer amount = 0.25
                 if action[4] == 0:
+                    if action[5] == 2:
                     if action[5] == 2:
                         amount = robot.power * 0.25
                     else:
@@ -554,6 +563,7 @@ class CustomLuxEnv(gym.Env):
                 
                 # transfer amount = 0.75
                 elif action[4] == 2:
+                    if action[5] == 2:
                     if action[5] == 2:
                         amount = robot.power * 0.75
                     else:
