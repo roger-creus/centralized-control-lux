@@ -174,64 +174,43 @@ class CustomLuxEnv(gym.Env):
                     if self.is_survival_reward:
                         ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
                         water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                        reward_now += (ice_dug_this_step / 100) + water_produced_this_step
+                        reward_now += (ice_dug_this_step / 75) + water_produced_this_step
 
                         ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                         metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
-
-                        new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        reward_now -= new_pickedup_water / 1000
-                        new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        reward_now -= new_pickedup_metal / 1000
-                        new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        reward_now += new_pickedup_power / 3000
-                        new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        reward_now -= new_consumed_water / 1000
+                        reward_now += ((ore_dug_this_step / 75) + metal_produced_this_step) / 2
 
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 500
+                        reward_now += new_lights / 100
                         new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 500
+                        reward_now += (new_heavies * 2) / 100
                         destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 500
+                        reward_now -= destroyed_lights / 100
                         destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 500
+                        reward_now -= (destroyed_heavies * 2) / 100
 
                     else:
                         ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
                         water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                        reward_now += (ice_dug_this_step / 100) + water_produced_this_step
+                        reward_now += (ice_dug_this_step / 75) + water_produced_this_step
 
                         ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                         metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                        reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 1.5
+                        reward_now += ((ore_dug_this_step / 75) + metal_produced_this_step) / 1.5
 
                         new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
                         reward_now += new_lichen / 10
 
-                        # new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        # reward_now -= new_pickedup_water / 100
-                        # new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        # reward_now -= new_pickedup_metal / 100
-                        # new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        # reward_now += new_pickedup_power / 300
-                        # new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        # reward_now -= new_consumed_water / 10
-
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 500
+                        reward_now += new_lights / 100
                         new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 500
+                        reward_now += (new_heavies * 2) / 100
                         destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 500
+                        reward_now -= destroyed_lights / 100
                         destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 500
+                        reward_now -= (destroyed_heavies * 2) / 100
                         destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
                         reward_now -= destroyed_factories * 3
-
-                        #power_used = metrics["power_used"] - self.prev_step_metrics["power_used"]
-                        #reward_now -= power_used / 500
 
                 self.prev_step_metrics = copy.deepcopy(metrics)
                 """
@@ -535,18 +514,9 @@ class CustomLuxEnv(gym.Env):
                     crafted_action[2] = 4
                 else:
                     print("incorrect transfer resource")
-                if action[5] == 0:
-                    crafted_action[2] = 0
-                elif action[5] == 1:
-                    crafted_action[2] = 1
-                elif action[5] == 2:
-                    crafted_action[2] = 4
-                else:
-                    print("incorrect transfer resource")
 
                 # transfer amount = 0.25
                 if action[4] == 0:
-                    if action[5] == 2:
                     if action[5] == 2:
                         amount = robot.power * 0.25
                     else:
@@ -563,7 +533,6 @@ class CustomLuxEnv(gym.Env):
                 
                 # transfer amount = 0.75
                 elif action[4] == 2:
-                    if action[5] == 2:
                     if action[5] == 2:
                         amount = robot.power * 0.75
                     else:
