@@ -6,12 +6,17 @@ import torch
 import math
 import copy
 
-from luxai_s2.state import ObservationStateDict, StatsStateDict
+#from luxai_s2.state import StatsStateDict
 from IPython import embed
 
 from jpype.types import JArray, JInt
 from gym import spaces
 from luxai_s2.env import LuxAI_S2
+
+from jux.env import JuxEnv
+from jux.config import JuxBufferConfig, EnvConfig
+import jax.numpy as jnp
+import rich
 
 from .env_utils import *
 
@@ -21,12 +26,13 @@ This custom env handles self-play and training of the bidder and placer.
 2) Every reset() call makes it to the normal game phase directly (queries the bidder and placer before resetting and trains them with a DQN-like algo and replay buffer)
 """
 
-class CustomLuxEnv(gym.Env):
+class CustomJuxEnv(gym.Env):
     def __init__(
             self, 
             self_play = False, 
             sparse_reward = True,
             simple_obs = True,
+            seed = 0,
             env_cfg = None, 
             device = "cuda:0", 
             PATH_AGENT_CHECKPOINTS = "checkpoints"
@@ -34,9 +40,12 @@ class CustomLuxEnv(gym.Env):
 
 
         # the true env
-        #self.env_ = LuxAI_S2(env_cfg, verbose=0, collect_stats=True)
-        env_id = "LuxAI_S2-v0"
-        self.env_ = gym.make(env_id, verbose=-1, collect_stats=True)
+        self.env_ = JuxEnv(
+            env_cfg=EnvConfig(),
+            buf_cfg=JuxBufferConfig(MAX_N_UNITS=200),
+        )
+
+        self.seed = seed
 
         self.self_play = self_play
         self.is_sparse_reward = sparse_reward
@@ -47,8 +56,8 @@ class CustomLuxEnv(gym.Env):
         self.prev_step_metrics = None
         self.enemy_agent = None
 
-        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.device = device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        #self.device = "cpu"
         self.PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS
         
         # observation space
@@ -63,7 +72,8 @@ class CustomLuxEnv(gym.Env):
         # dim 2: move direction [up, right, down, left] -- LENGTH 4
         # dim 3: transfer direction [center, up, right, down, left] -- LENGTH 5
         # dim 4: transfer amount [25%, 50%, 75%, 95%] -- LENGTH 4
-        # dim 5: transfer material [ice, ore, power] --LENGTH 3
+        # dim 5: transfer material [power, ore, metal, ice , water] --LENGTH 5
+        # dim 6: pickup material [power, ore, metal, ice , water] --LENGTH 5
         
         # TODO
         # dim 9: recycle [0,1] -- LENGTH 2
@@ -75,7 +85,7 @@ class CustomLuxEnv(gym.Env):
         # dim 1: factory action [NOOP, build light robot, build heavy robot, grow lichen] -- LENGTH 4
         self.action_space = gym.spaces.Dict({
             'robots': gym.spaces.MultiDiscrete(
-                [(48 * 48) - 1, 6, 4, 5, 4, 3]
+                [(48 * 48) - 1, 6, 4, 5, 4, 5, 5]
             ),
             'factories': gym.spaces.MultiDiscrete(
                 [(48 * 48) - 1, 4]
@@ -168,7 +178,7 @@ class CustomLuxEnv(gym.Env):
                 metrics["destroyed_heavies"] = stats["destroyed"]["HEAVY"]
                 metrics["destroyed_lights"] = stats["destroyed"]["LIGHT"]
 
-                reward_now =0
+                reward_now = 0
                 if self.prev_step_metrics is not None:
                     # survival reward only motivates getting ice, ore and creating robots
                     if self.is_survival_reward:
@@ -179,24 +189,24 @@ class CustomLuxEnv(gym.Env):
                         ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                         metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
                         reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 2
-                        
-                        # new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        # reward_now -= new_pickedup_water / 1000
-                        # new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        # reward_now -= new_pickedup_metal / 1000
-                        # new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        # reward_now += new_pickedup_power / 3000
-                        # new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        # reward_now -= new_consumed_water / 1000
+
+                        new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
+                        reward_now -= new_pickedup_water / 100
+                        new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
+                        reward_now -= new_pickedup_metal / 100
+                        new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
+                        reward_now += new_pickedup_power / 300
+                        new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                        reward_now -= new_consumed_water / 10
 
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 500
+                        reward_now += (new_lights / 100)
                         new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 500
+                        reward_now += (new_heavies / 100)
                         destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 500
+                        reward_now -= (destroyed_lights / 100)
                         destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 500
+                        reward_now -= (destroyed_heavies * 2) / 100
 
                     else:
                         ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
@@ -210,109 +220,37 @@ class CustomLuxEnv(gym.Env):
                         new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
                         reward_now += new_lichen / 10
 
-                        # new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
-                        # reward_now -= new_pickedup_water / 100
-                        # new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
-                        # reward_now -= new_pickedup_metal / 100
-                        # new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
-                        # reward_now += new_pickedup_power / 300
-                        # new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                        # reward_now -= new_consumed_water / 10
+                        new_pickedup_water = metrics["pickup_water"] - self.prev_step_metrics["pickup_water"]
+                        reward_now -= new_pickedup_water / 100
+                        
+                        new_pickedup_metal = metrics["pickup_metal"] - self.prev_step_metrics["pickup_metal"]
+                        reward_now -= new_pickedup_metal / 100
+
+                        new_pickedup_power = metrics["pickup_power"] - self.prev_step_metrics["pickup_power"]
+                        reward_now += new_pickedup_power / 300
+
+                        new_consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                        reward_now -= new_consumed_water / 10
 
                         new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 500
-                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 500
-                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 500
-                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 500
-                        destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
-                        reward_now -= destroyed_factories * 3
+                        reward_now += new_lights / 100
 
-                        #power_used = metrics["power_used"] - self.prev_step_metrics["power_used"]
-                        #reward_now -= power_used / 500
+                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
+                        reward_now += (new_heavies * 2) / 100
+
+                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
+                        reward_now -= destroyed_lights / 100
+
+                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
+                        reward_now -= (destroyed_heavies * 2) / 100
+
+                        destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
+                        reward_now -= destroyed_factories * 10
+
+                        power_used = metrics["power_used"] - self.prev_step_metrics["power_used"]
+                        reward_now -= power_used / 500
 
                 self.prev_step_metrics = copy.deepcopy(metrics)
-                """
-
-                # lichen change
-                lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
-                reward_now += lichen_reward
-                self.prev_lichen = reward["player_0"]
-
-                # lost factories
-                if num_factories - self.num_factories < 0:
-                    factories_lost = num_factories - self.num_factories
-                    reward_now -= factories_lost
-                self.num_factories = num_factories
-
-                # lost units
-                num_units = len(observations["player_0"]["units"]["player_0"].keys())
-                units_change = (num_units - self.num_units) / 100
-                reward_now += units_change
-                self.num_units = num_units
-
-                # ice in factories
-                factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                 
-                # ice in robots
-                if num_units != 0:
-                    unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                    unit_water = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["water"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                else:
-                    unit_ice = 0
-
-                # metal in factories
-                factories_ore = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ore"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-
-                # ore in robots
-                if num_units != 0:
-                    unit_ore = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ore"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                    unit_metal = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["metal"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                else:
-                    unit_ore = 0
-
-                factories_ore_change = factories_ore - self.factories_ore
-                factories_ice_change = factories_ice - self.factories_ice
-                factories_water_change = factories_water - self.factories_water
-                factories_metal_change = factories_metal - self.factories_metal
-
-                units_ice_change = unit_ice - self.unit_ice
-                units_ore_change = unit_ore - self.unit_ore
-                units_water_change = unit_water - self.unit_water
-                units_metal_change = unit_metal - self.unit_metal
-
-                self.factories_ore = factories_ore
-                self.factories_ice = factories_ice
-                self.factories_water = factories_water
-                self.factories_metal = factories_metal
-
-                # if factories have new ice its good!
-                if factories_ice_change > 0:
-                    reward_now += factories_ice_change
-                else:
-                    # if factories have less ice, its still good if they refined it
-                    # but its not good if someone picked it up
-                    if factories_water_change < 0:
-                        reward_now += factories_ice_change
-
-                # if factories have new ore its good!
-                if factories_ore_change > 0:
-                    reward_now += factories_ore_change
-                else:
-                    # if factories have less ice, its still good if they refined it
-                    # but its not good if someone picked it up
-                    if factories_metal_change < 0:
-                        reward_now += factories_ice_change
-
-                reward_now += factories_ore_change / 2
-
-                reward_now += units_ice_change / 4
-                reward_now += units_ore_change / 8
-                """
 
         done =  done["player_0"]
 
@@ -333,6 +271,7 @@ class CustomLuxEnv(gym.Env):
 
 
     def placement_heuristic_pro(self, observation, agent):
+        embed()
         ice = observation[agent]["board"]["ice"]
         ore = observation[agent]["board"]["ore"]
         rubble = observation[agent]["board"]["rubble"]
@@ -410,7 +349,7 @@ class CustomLuxEnv(gym.Env):
         if self.self_play and load_new_enemy==True:
             self.update_enemy_agent()
         
-        observations = self.env_.reset()
+        self.current_state = self.env_.reset(self.seed)
         self.num_factories = 0
         self.num_units = 0
         self.prev_step_metrics = None
@@ -419,33 +358,44 @@ class CustomLuxEnv(gym.Env):
         # TODO: get action from bidder model (preprocess into placer format)
 
         #Total resources that are available to bid
-        resources_amount = observations["player_0"]["board"]["factories_per_team"]*150
+        resources_amount = self.current_state.board.factories_per_team.item()*150
         
         # TODO: use a heurisitc
         #bids = self.bidding_heuristic(resources_amount)
         bids = [0,0]
-        
-        actions = {"player_0" : {"bid" : bids[0], "faction" : "AlphaStrike"}, "player_1" : {"bid" : bids[1], "faction" : "AlphaStrike"}}
+        factions = [0,0]
+
+        bid_action = jnp.array(np.hstack([bids[0], bids[1]]), dtype=jnp.int32)
+        faction_action = jnp.array(np.hstack([factions[0], factions[1]]), dtype=jnp.int8)
 
         # step into factory placement phase
-        observations, _, _, _ = self.env_.step(actions)
+        self.current_state, (observations, _, _, _) = self.env_.step_bid(self.current_state, bid_action, faction_action)
 
+        """
         factory_amount = {"player_0" : 0, "player_1" : 0}
         for player in factory_amount.keys():
             factory_amount[player] = observations["player_0"]["teams"][player]["water"]/observations["player_0"]["teams"][player]["factories_to_place"]
+        """
+
         # handle all the factory placement phase
-        while self.env_.state.real_env_steps < 0:
-            action = dict()
+        while self.current_state.real_env_steps.item() < 0:
+            spawn_action = jnp.zeros([2,2], dtype=jnp.int8)
+            water_action = jnp.zeros([2,2], dtype=jnp.int32)
+            metal_action = jnp.zeros([2,2], dtype=jnp.int32)
+
             
-            for agent in self.env_.agents:
-                if my_turn_to_place_factory(observations[agent]["teams"][agent]["place_first"], self.env_.state.env_steps):
+            for agent in ["player_0", "player_1"]:
+                embed()
+                if my_turn_to_place_factory(observations[agent].place_first, self.current_state.env_steps.item()):
                     # TODO: get action from placer model
                     spawn_loc = self.placement_heuristic_pro(observations, agent)
-                    action[agent] = dict(spawn=spawn_loc, metal=factory_amount[agent], water=factory_amount[agent])
-                else:
-                    action[agent] = dict()
-            
-            observations, _, _, _ = self.env_.step(action)
+                    agent_idx = int(agent.split("_")[1])
+                    
+                    spawn_action[:, agent_idx, :] = jnp.array(spawn_loc, dtype=jnp.int8)
+                    water_action[:, agent_idx] = jnp.array(150, dtype=jnp.int8)
+                    metal_action[:, agent_idx] = jnp.array(150, dtype=jnp.int8)
+                
+            self.current_state, (observations, rewards, dones, infos) = self.env_.step_factory_placement(self.current_state, spawn_action, water_action, metal_action)
 
         # start total_water and total_metal used in to compute rewards
         factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
@@ -453,9 +403,6 @@ class CustomLuxEnv(gym.Env):
         factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
         self.total_metal = factories_metal
         self.num_factories = observations["player_0"]["board"]["factories_per_team"]
-
-        # keep the current game state updated
-        self.current_state = observations
 
         # finally reset into the normal game
         self.current_player_obs = self.simple_obs_(observations, "player_0") if self.simple_obs == True else self.obs_(observations, "player_0")
@@ -527,18 +474,11 @@ class CustomLuxEnv(gym.Env):
                 # transfer direction
                 crafted_action[1] = action[3]
                 # transfer resource
-                if action[5] == 0:
-                    crafted_action[2] = 0
-                elif action[5] == 1:
-                    crafted_action[2] = 1
-                elif action[5] == 2:
-                    crafted_action[2] = 4
-                else:
-                    print("incorrect transfer resource")
+                crafted_action[2] = action[5]
 
                 # transfer amount = 0.25
                 if action[4] == 0:
-                    if action[5] == 2:
+                    if action[5] == 4:
                         amount = robot.power * 0.25
                     else:
                         resource = RESOURCE_MAPPING[action[5]]
@@ -546,7 +486,7 @@ class CustomLuxEnv(gym.Env):
                 
                 # transfer amount = 0.5
                 elif action[4] == 1:
-                    if action[5] == 2:
+                    if action[5] == 4:
                         amount = robot.power * 0.5
                     else:
                         resource = RESOURCE_MAPPING[action[5]]
@@ -554,7 +494,7 @@ class CustomLuxEnv(gym.Env):
                 
                 # transfer amount = 0.75
                 elif action[4] == 2:
-                    if action[5] == 2:
+                    if action[5] == 4:
                         amount = robot.power * 0.75
                     else:
                         resource = RESOURCE_MAPPING[action[5]]
@@ -562,7 +502,7 @@ class CustomLuxEnv(gym.Env):
                 
                 # transfer amount = 0.95
                 elif action[4] == 3:
-                    if action[5] == 2:
+                    if action[5] == 4:
                         amount = robot.power * 0.95
                     else:
                         resource = RESOURCE_MAPPING[action[5]]
@@ -576,22 +516,23 @@ class CustomLuxEnv(gym.Env):
             elif action[1] == 3:
                 # action_type = PICKUP
                 crafted_action[0] = 2
-                # pickup resource is always POWER
-                crafted_action[2] = 4
+                # pickup resource
+                crafted_action[2] = action[6]
                 # fix pickup amount to 25% of available cargo
                 free_power_capacity = robot.battery_capacity - robot.power
+                power_amount = free_power_capacity * 0.25
                 
-                #current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                #free_resource_capacity = robot.cargo_space - current_cargo
-                #resource_amount = free_resource_capacity * 0.25
+                current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
+                free_resource_capacity = robot.cargo_space - current_cargo
+                resource_amount = free_resource_capacity * 0.25
 
-                # if action[6] == 4:
-                #     amount = power_amount
-                # else:
-                #     resource = RESOURCE_MAPPING[action[6]]
-                #     amount = resource_amount
+                if action[6] == 4:
+                    amount = power_amount
+                else:
+                    resource = RESOURCE_MAPPING[action[6]]
+                    amount = resource_amount
 
-                crafted_action[3] = free_power_capacity
+                crafted_action[3] = amount
 
                 """
                 # pickup amount = 0.25
@@ -1062,14 +1003,3 @@ def make_env(seed):
         return env
 
     return thunk
-
-if __name__ == "__main__":
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(3 + i) for i in range(8)]
-    )
-
-    obs = envs.reset()
-
-    action = dict()
-    action["factories"] = [10, 2]
-    action["robots"] = [15, 2, 1, 1, 1, 1, 1, 1, 1, 0]

@@ -26,7 +26,7 @@ import copy
 
 from IPython import embed
 
-from envs_folder.custom_env import CustomLuxEnv
+from envs_folder.custom_env_jux import CustomJuxEnv
 
 import os
 import sys
@@ -128,11 +128,8 @@ def init_jvm(jvmpath=None):
 # utility to create Vectorized env
 def make_env(seed, self_play, sparse_reward, simple_obs, device):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
+        env = CustomJuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, seed = seed, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
         return env
     return thunk
 
@@ -239,7 +236,7 @@ class Agent(nn.Module):
 
         self.encoder = Encoder(c)
 
-        self.actor_robots = Decoder(22)
+        self.actor_robots = Decoder(29)
         self.actor_factories = Decoder(4)
 
         self.critic = nn.Sequential(

@@ -65,7 +65,8 @@ def get_factory_invalid_action_masks(envs, player):
 
 
 def get_robot_invalid_action_masks(envs, player):
-    # the returned mask will be of shape (num_envs, map_size, map_size, total_unit_actions)
+    # the returned mask will be of shape (num_envs, map_size, map_size, total_unit_actions + 1)
+    # the +1 in the end indicates if if there is a unit in tile x,y. takes values in [0,1]
     if type(envs) == gym.vector.sync_vector_env.SyncVectorEnv:
         action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["robots"].nvec[1:].sum() + 1))
         envs = envs.envs
@@ -76,6 +77,7 @@ def get_robot_invalid_action_masks(envs, player):
     else:
         print("error with type", type(envs))
 
+    # create the mask for each environment
     for i in range(len(envs)):
         env = envs[i]
         game_state = env.env_.state
@@ -102,6 +104,7 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i, x, y, 7] = 0
                 action_mask[i, x, y, 12] = 0
                 can_move_up = False
+            # if not enough power to move due to rubble cost
             if current_power <= move_cost_up + update_queue_cost:
                 action_mask[i, x, y, 7] = 0
                 can_move_up = False
@@ -113,6 +116,7 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i, x, y, 8] = 0
                 action_mask[i, x, y, 13] = 0
                 can_move_right = False
+            # if not enough power to move due to rubble cost
             if current_power <= move_cost_right + update_queue_cost:
                 action_mask[i, x, y, 8] = 0
                 can_move_right = False
@@ -124,6 +128,7 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i, x, y, 9] = 0
                 action_mask[i, x, y, 14] = 0
                 can_move_down = False
+            # if not enough power to move due to rubble cost
             if current_power <= move_cost_down + update_queue_cost:
                 action_mask[i, x, y, 9] = 0
                 can_move_down = False
@@ -135,6 +140,7 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i, x, y, 10] = 0
                 action_mask[i, x, y, 15] = 0
                 can_move_left = False
+            # if not enough power to move due to rubble cost
             if current_power <= move_cost_left + update_queue_cost:
                 action_mask[i, x, y, 10] = 0
                 can_move_left = False
@@ -144,12 +150,14 @@ def get_robot_invalid_action_masks(envs, player):
                 action_mask[i,x,y,2] = 0
 
             ###### TRANSFER ACTION TYPE ######
+            # check if unit is on top of factory
             factory_center = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y]
             can_transfer_center = True
             if factory_center == -1:
                 can_transfer_center = False
                 action_mask[i,x,y,11] = 0
 
+            # check whats one tile up from the robot
             if unit.pos.y - 1 >= 0:
                 factory_up = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y - 1]
                 robot_up = game_state.board.get_units_at(Position(np.array([unit.pos.x, unit.pos.y - 1])))
@@ -158,6 +166,7 @@ def get_robot_invalid_action_masks(envs, player):
                 robot_up = None
 
             can_transfer_up = True
+            # if no ally factory or unit is up then mask transfer up
             if factory_up == -1 and robot_up is None:
                 can_transfer_up = False
                 action_mask[i,x,y,12] = 0
@@ -170,6 +179,7 @@ def get_robot_invalid_action_masks(envs, player):
                 robot_right = None
 
             can_transfer_right = True
+            # if no ally factory or unit is right then mask transfer right
             if factory_right == -1 and robot_right is None:
                 can_transfer_right = False
                 action_mask[i,x,y,13] = 0
@@ -182,6 +192,7 @@ def get_robot_invalid_action_masks(envs, player):
                 robot_down = None
 
             can_transfer_down = True
+            # if no ally factory or unit is down then mask transfer down
             if factory_down == -1 and robot_down is None:
                 can_transfer_down = False
                 action_mask[i,x,y,14] = 0
@@ -194,22 +205,47 @@ def get_robot_invalid_action_masks(envs, player):
                 robot_left = None
 
             can_transfer_left = True
+            # if no ally factory or unit is left then mask transfer left
             if factory_left == -1 and robot_left is None:
                 can_transfer_left = False
                 action_mask[i,x,y,15] = 0
 
-            if can_transfer_left == False and can_transfer_up == False and can_transfer_down == False and can_transfer_right == False and can_transfer_center == False:
+            robot_ice = unit.cargo.ice
+            has_ice = True
+            # if unit has no ice then cannot transfer ice
+            if robot_ice == 0:
+                action_mask[i,x,y,20] = 0
+                has_ice = False
+
+            robot_ore = unit.cargo.ore
+            has_ore = True
+            # if unit has no ore then cannot transfer ore
+            if robot_ore == 0:
+                action_mask[i,x,y,21] = 0
+                has_ore = False
+
+            robot_power = unit.power
+            has_power = True
+            # if unit has no power then cannot transfer power
+            if robot_power < 5:
+                action_mask[i,x,y,22] = 0
+                has_power = False
+
+            # if there is no ally unit or ally factory in any adjacent tile -> mask TRANSFER and all transfer params
+            # OR if there is no power, ice or ore in cargo to transfer -> mask TRANSFER and all transfer params
+            if (can_transfer_left == False and can_transfer_up == False and can_transfer_down == False and can_transfer_right == False and can_transfer_center == False) or (has_power == False and has_ice == False and has_ore == False):
                 action_mask[i,x,y,3] = 0
+                action_mask[i,x,y,11:23] = 0
+            
 
             ###### PICKUP DIG ACTION TYPE ######
             factory_there = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y]
 
-            # if there is no factory on top of unit -> cannot pick up (no pick up amount [4 actions] and no pick up resource [5 actions])
+            # if there is no factory on top of unit -> cannot pick up power
             if factory_there == -1:
                 action_mask[i, x, y, 4] = 0
-                action_mask[i, x, y, 25:30] = 0
+                #action_mask[i, x, y, 25:30] = 0
 
-            # mask dig if on top of factory or no resources to dig
             board_sum = (
                 game_state.board.ice[unit.pos.x, unit.pos.y]
                 + game_state.board.ore[unit.pos.x, unit.pos.y]
@@ -217,6 +253,7 @@ def get_robot_invalid_action_masks(envs, player):
                 + game_state.board.lichen[unit.pos.x, unit.pos.y]
             )
 
+            # mask dig if on top of factory or no resources to dig
             if board_sum == 0 or factory_there != -1:
                 action_mask[i, x, y, 5] = 0
 
