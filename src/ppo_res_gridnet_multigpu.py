@@ -456,7 +456,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_gridnet"
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet"
 
     if local_rank == 0:
         if args.track:
