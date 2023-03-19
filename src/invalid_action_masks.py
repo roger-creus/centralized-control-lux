@@ -5,8 +5,6 @@ import math
 import luxai_s2.unit as luxai_unit
 from luxai_s2.map.position import Position
 
-from IPython import embed
-
 import gym
 import numpy as np
 import torch
@@ -17,6 +15,69 @@ from luxai_s2.map.position import Position
 from utils import VideoWrapper
 
 from IPython import embed
+
+def post_masks(robot_masks, action_types):
+    # we are going to correct the masks only where there are robots
+    # where there are no robots all actions should already be set to ilegal
+    
+    # if there are no robots, nothing to correct, all should be ilegal already
+    max_ = torch.max(robot_masks[:,0]).item()
+    if max_ == 0:
+        return robot_masks
+
+    robot_idcs = torch.where(robot_masks[:,0] == max_)[0].cpu().numpy()
+    for idx in robot_idcs:
+        action = action_types[idx].item()
+        # if sampled action is NOOP, dont learn from ANY parameter
+        if action == 0:
+            robot_masks[idx, 7:] = 0
+        # if sampled action is MOVE, dont learn from TRANSFER parameters
+        elif action == 1:
+            robot_masks[idx, 11:] = 0
+        # if sampled action is TRANSFER, dont learn from MOVE parameters
+        elif action == 2:
+            robot_masks[idx, 7:11] = 0
+        else:
+            continue
+    return robot_masks
+
+def post_categoricals(multi_categoricals, action_types, robot_masks):
+    """
+    Mask the logits and probs of actions that were not ilegal but are not going to be executed
+    Can be done only if logits and logprobs dont require grad() -> During ROLLOUTs
+    Use the robot_masks only to identify where there actually are robots
+    Q: Why do I need to set logits and logprobs to 0? shouldnt be -1e+8 for the logits?
+    """
+    # if there are no robots, nothing to correct, all should be ilegal already
+    max_ = torch.max(robot_masks[:,0]).item()
+    if max_ == 0:
+        return multi_categoricals
+
+    robot_idcs = torch.where(robot_masks[:,0] == max_)[0].cpu().numpy()
+    for idx in robot_idcs:
+        action = action_types[idx].item()
+        
+        # if sampled action is NOOP, masks all parameters
+        if action == 0:
+            for i in range(len(multi_categoricals[1:])):
+                multi_categoricals[1:][i].logits[idx][:] = 0
+                multi_categoricals[1:][i].probs[idx][:] = 0.
+
+        # if sampled action is MOVE, mask all transfer params
+        elif action == 1:
+            for i in range(len(multi_categoricals[2:])):
+                multi_categoricals[2:][i].logits[idx][:] = 0
+                multi_categoricals[2:][i].probs[idx][:] = 0.
+        
+        # if sampled action is TRANSFER, mask all move params
+        elif action == 2:
+            multi_categoricals[1].logits[idx] = 0
+            multi_categoricals[1].probs[idx] = 0.
+        
+        else:
+            continue
+
+    return multi_categoricals
 
 def get_factory_invalid_action_masks(envs, player):
     if type(envs) == gym.vector.sync_vector_env.SyncVectorEnv:
