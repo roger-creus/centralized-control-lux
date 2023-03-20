@@ -40,7 +40,6 @@ class CustomLuxEnv(gym.Env):
 
         self.self_play = self_play
         self.is_sparse_reward = sparse_reward
-        self.is_survival_reward = True
         
         self.simple_obs = simple_obs
 
@@ -149,10 +148,6 @@ class CustomLuxEnv(gym.Env):
                 # consumption of power in robots (-)
                 metrics["power_used"] = stats["consumption"]["power"]["LIGHT"] + stats["consumption"]["power"]["HEAVY"]
 
-                # pickup water and metal (-)
-                metrics["pickup_water"] = stats["pickup"]["water"]
-                metrics["pickup_metal"] = stats["pickup"]["metal"]
-
                 # pickup power (+)
                 metrics["pickup_power"] = stats["pickup"]["power"]
 
@@ -168,53 +163,45 @@ class CustomLuxEnv(gym.Env):
                 metrics["destroyed_heavies"] = stats["destroyed"]["HEAVY"]
                 metrics["destroyed_lights"] = stats["destroyed"]["LIGHT"]
 
-                reward_now =0
+                reward_now = 0
                 if self.prev_step_metrics is not None:
-                    # survival reward only motivates getting ice, ore and creating robots
-                    if self.is_survival_reward:
-                        ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
-                        water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                        reward_now += (ice_dug_this_step / 75) + water_produced_this_step
+                    
+                    # positive reward for mining ice and generating water
+                    ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
+                    water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
+                    reward_now += (ice_dug_this_step / 100) + water_produced_this_step
 
-                        ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
-                        metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                        reward_now += ((ore_dug_this_step / 75) + metal_produced_this_step) / 2
+                    # positive reward for mining ore and generating metal
+                    ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
+                    metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
+                    reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 1.5
 
-                        new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 100
-                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 100
-                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 100
-                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 100
+                    # positive reward for creating new robots
+                    new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
+                    reward_now += new_lights / 30
+                    new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
+                    reward_now += (new_heavies) / 30
 
-                    else:
-                        ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
-                        water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                        reward_now += (ice_dug_this_step / 75) + water_produced_this_step
+                    # negative reward for robots dying
+                    destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
+                    reward_now -= destroyed_lights / 30
+                    destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
+                    reward_now -= (destroyed_heavies * 2) / 30
 
-                        ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
-                        metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                        reward_now += ((ore_dug_this_step / 75) + metal_produced_this_step) / 1.5
+                    # BIG negative reward for consuming water
+                    consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                    reward_now -= consumed_water
 
-                        new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
-                        reward_now += new_lichen / 10
+                    # SMALL positive reward for creating lichen
+                    new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
+                    reward_now += new_lichen / 100
 
-                        new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                        reward_now += new_lights / 100
-                        new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                        reward_now += (new_heavies * 2) / 100
-                        destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                        reward_now -= destroyed_lights / 100
-                        destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                        reward_now -= (destroyed_heavies * 2) / 100
-                        destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
-                        reward_now -= destroyed_factories * 3
+                    # negative reward for loosing a factory
+                    destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
+                    reward_now -= destroyed_factories * 3
 
                 self.prev_step_metrics = copy.deepcopy(metrics)
                 """
-
                 # lichen change
                 lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
                 reward_now += lichen_reward
@@ -1018,10 +1005,6 @@ class CustomLuxEnv(gym.Env):
     
     def set_sparse_reward(self):
         self.is_sparse_reward = True
-
-    def set_dense_reward(self):
-        self.is_sparse_reward = False
-        self.is_survival_reward = False
 
     def update_enemy_agent(self):
         try:

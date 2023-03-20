@@ -525,11 +525,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
 
-            # Reward curricula
-            if global_step > 100000000:
-                for i in range(len(envs.envs)):
-                    envs.envs[i].set_dense_reward()
-            
             if global_step > 200000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()

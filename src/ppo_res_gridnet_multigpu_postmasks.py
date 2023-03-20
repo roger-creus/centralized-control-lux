@@ -241,9 +241,9 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(256, 128, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(64, 64, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(64, 64, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
             layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
@@ -252,14 +252,12 @@ class Decoder(nn.Module):
         )
 
         self.fc_dec = nn.Sequential(
-            nn.Linear(128, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256 * 3 * 3)
+            nn.Linear(128, 64 * 3 * 3),
         )
 
     def forward(self, x):
         x = self.fc_dec(x)
-        x = x.view(-1, 256, 3, 3)
+        x = x.view(-1, 64, 3, 3)
         return self.deconv(x)
 
 
@@ -271,7 +269,7 @@ class Agent(nn.Module):
 
         shape = (c, h, w)
         conv_seqs = []
-        for out_channels in [32, 64, 128, 256]:
+        for out_channels in [32, 64, 64, 64]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -466,7 +464,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_gridnet"
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post"
 
     if local_rank == 0:
         if args.track:
@@ -583,11 +581,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
-
-            # Reward curricula
-            if global_step > 100000000:
-                for i in range(len(envs.envs)):
-                    envs.envs[i].set_dense_reward()
             
             if global_step > 200000000:
                 for i in range(len(envs.envs)):

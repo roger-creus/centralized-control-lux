@@ -981,10 +981,6 @@ class CustomJuxEnv(gym.Env):
     def set_sparse_reward(self):
         self.is_sparse_reward = True
 
-    def set_dense_reward(self):
-        self.is_sparse_reward = False
-        self.is_survival_reward = False
-
     def update_enemy_agent(self):
         try:
             self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
