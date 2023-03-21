@@ -241,9 +241,9 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(64, 64, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(128, 128, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(64, 64, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
             layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
@@ -252,12 +252,12 @@ class Decoder(nn.Module):
         )
 
         self.fc_dec = nn.Sequential(
-            nn.Linear(128, 64 * 3 * 3),
+            nn.Linear(256, 128 * 3 * 3),
         )
 
     def forward(self, x):
         x = self.fc_dec(x)
-        x = x.view(-1, 64, 3, 3)
+        x = x.view(-1, 128, 3, 3)
         return self.deconv(x)
 
 
@@ -269,7 +269,7 @@ class Agent(nn.Module):
 
         shape = (c, h, w)
         conv_seqs = []
-        for out_channels in [32, 64, 64, 64]:
+        for out_channels in [32, 64, 128, 128]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -277,7 +277,7 @@ class Agent(nn.Module):
         conv_seqs += [
             nn.Flatten(),
             nn.ReLU(),
-            nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=128),
+            nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256),
             nn.ReLU(),
         ]
 
@@ -288,7 +288,7 @@ class Agent(nn.Module):
 
         self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(128, 128), std=1),
+            layer_init(nn.Linear(256, 128), std=1),
             nn.ReLU(),
             layer_init(nn.Linear(128, 1), std=1),
         )
@@ -445,11 +445,10 @@ if __name__ == "__main__":
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
-
-    # set the port number
-    #os.environ['MASTER_PORT'] = '29411'
-
+    
     if world_size > 1:
+        # set the port number
+        os.environ['MASTER_PORT'] = '29406'
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
         warnings.warn(
@@ -781,7 +780,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # Evaluation!
             if update % args.eval_interval == 0:
                 agent.freeze_params()
-                envs_test = make_eval_env(np.random.randint(1000), args.self_play, args.sparse_reward, args.simple_obs, device, PATH_AGENT_CHECKPOINTS)
+                envs_test = make_eval_env(np.random.randint(1000) + update, args.self_play, args.sparse_reward, args.simple_obs, device, PATH_AGENT_CHECKPOINTS)
                 envs_test.set_enemy_agent(agent)
                 envs_test = VideoWrapper(envs_test, update_freq=1)
                 mean_reward = []
