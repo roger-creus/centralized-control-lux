@@ -27,7 +27,7 @@ import copy
 from IPython import embed
 import torch.nn.functional as F
 
-from envs_folder.custom_env_final import CustomLuxEnvFinal
+from envs_folder.custom_env import CustomLuxEnv
 
 import os
 import sys
@@ -59,7 +59,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=500000000,
+    parser.add_argument("--total-timesteps", type=int, default=100000000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -129,7 +129,7 @@ def init_jvm(jvmpath=None):
 # utility to create Vectorized env
 def make_env(seed, self_play, sparse_reward, simple_obs, device):
     def thunk():
-        env = CustomLuxEnvFinal(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
+        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -179,7 +179,7 @@ class SqEx(nn.Module):
         if n_features % reduction != 0:
             raise ValueError('n_features must be divisible by reduction (default = 16)')
         self.linear1 = nn.Linear(n_features, n_features // reduction, bias=True)
-        self.nonlin1 = nn.ReLU()
+        self.nonlin1 = nn.ReLU(inplace=True)
         self.linear2 = nn.Linear(n_features // reduction, n_features, bias=True)
         self.nonlin2 = nn.Sigmoid()
 
@@ -196,10 +196,10 @@ class ResBlockSqEx(nn.Module):
     def __init__(self, n_features):
         super(ResBlockSqEx, self).__init__()
         # convolutions
-        self.relu1 = nn.LeakyReLU(0.1)
-        self.conv1 = nn.Conv2d(n_features, n_features, kernel_size=5, stride=1, padding=2, bias=False)
-        self.relu2 = nn.LeakyReLU(0.1)
-        self.conv2 = nn.Conv2d(n_features, n_features, kernel_size=5, stride=1, padding=2, bias=False)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False)
+        self.relu2 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False)
 
         # squeeze and excitation
         self.sqex  = SqEx(n_features)
@@ -219,12 +219,16 @@ class ConvSequence(nn.Module):
         super().__init__()
         self._input_shape = input_shape
         self._out_channels = out_channels
+        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1)
         self.res_block0 = ResBlockSqEx(self._out_channels)
         self.res_block1 = ResBlockSqEx(self._out_channels)
 
     def forward(self, x):
+        x = self.conv(x)
+        #x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         x = self.res_block0(x)
         x = self.res_block1(x)
+        assert x.shape[1:] == self.get_output_shape()
         return x
 
     def get_output_shape(self):
@@ -236,8 +240,11 @@ class Decoder(nn.Module):
     def __init__(self, output_channels):
         super().__init__()
 
-        self.deconv = nn.Conv2d(64, output_channels, kernel_size = 1, stride = 1)
-
+        self.deconv = nn.Sequential(
+            layer_init(nn.Conv2d(128, output_channels, 1, stride=1)),
+            Transpose((0, 2, 3, 1)),
+        )
+        
     def forward(self, x):
         return self.deconv(x)
 
@@ -250,10 +257,7 @@ class Agent(nn.Module):
 
         shape = (c, h, w)
         conv_seqs = []
-        
-        conv_seqs.append(nn.Conv2d(in_channels=c, out_channels=64, kernel_size=3, padding=1))
-
-        for out_channels in [64, 64, 64, 64]:
+        for out_channels in [32, 64, 128, 128]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -264,7 +268,8 @@ class Agent(nn.Module):
         self.actor_factories = Decoder(4)
 
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(64, 1), std=1)
+            nn.Flatten(),
+            layer_init(nn.Linear(128, 1), std=1),
         )
     
     def save_checkpoint(self, idx, pool_size, path):
@@ -406,9 +411,7 @@ class Agent(nn.Module):
         return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
 
     def get_value(self, x):
-        x = self(x)
-        x = torch.mean(x, dim=(-1, -2))
-        return self.critic(x)
+        return self.critic(self.forward(x))
 
 
 if __name__ == "__main__":
@@ -424,7 +427,7 @@ if __name__ == "__main__":
     
     if world_size > 1:
         # set the port number
-        os.environ['MASTER_PORT'] = '29406'
+        #os.environ['MASTER_PORT'] = '29406'
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
         warnings.warn(
@@ -439,7 +442,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_gridnet_post"
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post_long"
 
     if local_rank == 0:
         if args.track:
@@ -476,7 +479,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     torch.backends.cudnn.allow_tf32 = False
 
     if len(args.device_ids) > 0:
-        assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
         device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
     else:
         device_count = torch.cuda.device_count()
@@ -488,7 +490,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # env setup
     init_jvm()
 
-    print("Thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+    print("local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
 
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
@@ -557,7 +559,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
-            if global_step > 200000000:
+            if global_step > 1000000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1
@@ -634,7 +636,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             for info in infos:
                 if "episode" in info.keys() and local_rank == 0:
-                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}, episode_winner={'player_0' if info['result'] == 1 else 'player_1'}")
+                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                     writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                     break

@@ -54,7 +54,7 @@ class CustomLuxEnv(gym.Env):
         if self.simple_obs:
             self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 19), dtype=np.float64)
         else:
-            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 18), dtype=np.float64)
+            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 17), dtype=np.float64)
 
         # ROBOTS
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
@@ -178,19 +178,19 @@ class CustomLuxEnv(gym.Env):
 
                     # positive reward for creating new robots
                     new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
-                    reward_now += new_lights / 30
+                    reward_now += new_lights / 50
                     new_heavies = metrics["count_heavies"] - self.prev_step_metrics["count_heavies"]
-                    reward_now += (new_heavies) / 30
+                    reward_now += (new_heavies * 10) / 50
 
                     # negative reward for robots dying
                     destroyed_lights = metrics["destroyed_lights"] - self.prev_step_metrics["destroyed_lights"]
-                    reward_now -= destroyed_lights / 30
+                    reward_now -= destroyed_lights / 50
                     destroyed_heavies = metrics["destroyed_heavies"] - self.prev_step_metrics["destroyed_heavies"]
-                    reward_now -= (destroyed_heavies * 2) / 30
+                    reward_now -= (destroyed_heavies * 10) / 50
 
                     # BIG negative reward for consuming water
                     consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                    reward_now -= consumed_water
+                    reward_now -= consumed_water / 10
 
                     # SMALL positive reward for creating lichen
                     new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
@@ -642,17 +642,16 @@ class CustomLuxEnv(gym.Env):
         is_day_ = np.tile(int(is_day(self.env_.env_cfg, env_steps)), (48,48))
 
         rubble = np.array(obs["board"]["rubble"], dtype=float) / 100
-        ore = np.array(obs["board"]["ore"], dtype=float) / 10
-        ice = np.array(obs["board"]["ice"], dtype=float) / 10
+        ore = np.array(obs["board"]["ore"], dtype=float) 
+        ice = np.array(obs["board"]["ice"], dtype=float)
         lichen = np.array(obs["board"]["lichen"], dtype=float) / 100
+        is_resource = (ore.astype(bool) * 1) | (ice.astype(bool) * 1)
 
         light_units = np.zeros((48,48), dtype=float)
         heavy_units = np.zeros((48,48), dtype=float)
         unit_power = np.zeros((48,48), dtype=float)
         unit_ice = np.zeros((48,48), dtype=float)
         unit_ore = np.zeros((48,48), dtype=float)
-        unit_water = np.zeros((48,48), dtype=float)
-        unit_metal = np.zeros((48,48), dtype=float)
         unit_on_factories = np.zeros((48,48), dtype=float)
 
         my_units = obs["units"][player]
@@ -663,52 +662,40 @@ class CustomLuxEnv(gym.Env):
             x, y = unit["pos"][0], unit["pos"][1]
             factory_there = self.env_.state.board.factory_occupancy_map[x,y]
 
-            unit_ice[x][y] = unit["cargo"]["ice"] 
-            unit_water[x][y] = unit["cargo"]["water"] 
-            unit_metal[x][y] = unit["cargo"]["metal"]
-            unit_ore[x][y] = unit["cargo"]["ore"] 
-            unit_on_factories[x][y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
+            unit_ice[x, y] = unit["cargo"]["ice"] 
+            unit_ore[x, y] = unit["cargo"]["ore"] 
+            unit_on_factories[x, y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
             
             if unit["unit_type"] == 'LIGHT':
-                light_units[x][y] = 1
-                unit_power[x][y] /= 150
-                unit_ice[x][y] /= 100
-                unit_water[x][y] /= 100
-                unit_metal[x][y] /= 100
-                unit_ore[x][y] /= 100
+                light_units[x, y] = 1
+                unit_power[x, y] /= 150
+                unit_ice[x, y] /= 10
+                unit_ore[x, y] /= 10
             else:
-                heavy_units[x][y] = 1
-                unit_power[x][y] /= 3000
-                unit_ice[x][y] /= 1000
-                unit_water[x][y] /= 1000
-                unit_metal[x][y] /= 1000
-                unit_ore[x][y] /= 1000
+                heavy_units[x, y] = 1
+                unit_power[x, y] /= 3000
+                unit_ice[x, y] /= 100
+                unit_ore[x, y] /= 100
 
         for unit_id in enemy_units:
             unit = enemy_units[unit_id]
             x, y = unit["pos"][0], unit["pos"][1]
             factory_there = self.env_.state.board.factory_occupancy_map[x,y]
 
-            unit_ice[x][y] = - unit["cargo"]["ice"] 
-            unit_water[x][y] = - unit["cargo"]["water"] 
-            unit_metal[x][y] = - unit["cargo"]["metal"]
-            unit_ore[x][y] = - unit["cargo"]["ore"] 
-            unit_on_factories[x][y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
+            unit_ice[x, y] = - unit["cargo"]["ice"] 
+            unit_ore[x, y] = - unit["cargo"]["ore"] 
+            unit_on_factories[x, y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
             
             if unit["unit_type"] == 'LIGHT':
-                light_units[x][y] = -1
-                unit_power[x][y] /= 150
-                unit_ice[x][y] /= 100
-                unit_water[x][y] /= 100
-                unit_metal[x][y] /= 100
-                unit_ore[x][y] /= 100
+                light_units[x, y] = -1
+                unit_power[x, y] /= 150
+                unit_ice[x, y] /= 10
+                unit_ore[x, y] /= 10
             else:
-                heavy_units[x][y] = -1
-                unit_power[x][y] /= 3000
-                unit_ice[x][y] /= 1000
-                unit_water[x][y] /= 1000
-                unit_metal[x][y] /= 1000
-                unit_ore[x][y] /= 1000
+                heavy_units[x, y] = -1
+                unit_power[x, y] /= 3000
+                unit_ice[x, y] /= 100
+                unit_ore[x, y] /= 100
 
         # get factories data
         factories = np.zeros((48,48), dtype=float)
@@ -724,21 +711,21 @@ class CustomLuxEnv(gym.Env):
             factory = my_factories[factory_id]
             x, y = factory["pos"][0], factory["pos"][1]
 
-            factories[x][y] = 1
-            factory_ice[x][y] = factory["cargo"]["ice"] / 100
-            factory_water[x][y] = factory["cargo"]["water"] / 100
-            factory_metal[x][y] = factory["cargo"]["metal"] / 100
-            factory_ore[x][y] = factory["cargo"]["ore"] / 100
+            factories[x-1:x+2, y-1:y+2] = 1
+            factory_ice[x-1:x+2, y-1:y+2] = factory["cargo"]["ice"] / 150
+            factory_water[x-1:x+2, y-1:y+2] = factory["cargo"]["water"] / 150
+            factory_metal[x-1:x+2, y-1:y+2] = factory["cargo"]["metal"] / 150
+            factory_ore[x-1:x+2, y-1:y+2] = factory["cargo"]["ore"] / 150
 
         for factory_id in enemy_factories:
             factory = enemy_factories[factory_id]
             x, y = factory["pos"][0], factory["pos"][1]
 
-            factories[x][y] = -1
-            factory_ice[x][y] = - factory["cargo"]["ice"] / 100
-            factory_water[x][y] = - factory["cargo"]["water"] / 100
-            factory_metal[x][y] = - factory["cargo"]["metal"] / 100
-            factory_ore[x][y] = - factory["cargo"]["ore"] / 100
+            factories[x-1:x+2, y-1:y+2] = -1
+            factory_ice[x-1:x+2, y-1:y+2] = - factory["cargo"]["ice"] / 150
+            factory_water[x-1:x+2, y-1:y+2] = - factory["cargo"]["water"] / 150
+            factory_metal[x-1:x+2, y-1:y+2] = - factory["cargo"]["metal"] / 150
+            factory_ore[x-1:x+2, y-1:y+2] = - factory["cargo"]["ore"] / 150
 
         # 30 channels of information!
         obs = np.stack([
@@ -747,11 +734,10 @@ class CustomLuxEnv(gym.Env):
             ore, 
             ice,
             lichen, 
+            is_resource,
             light_units,
             heavy_units,
             unit_ice,
-            unit_metal,
-            unit_water,
             unit_ore,
             unit_power,
             unit_on_factories,

@@ -59,7 +59,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=500000000,
+    parser.add_argument("--total-timesteps", type=int, default=100000000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -269,7 +269,7 @@ class Agent(nn.Module):
 
         shape = (c, h, w)
         conv_seqs = []
-        for out_channels in [32, 64, 128, 128]:
+        for out_channels in [32, 64, 128, 256]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -448,7 +448,7 @@ if __name__ == "__main__":
     
     if world_size > 1:
         # set the port number
-        os.environ['MASTER_PORT'] = '29406'
+        #os.environ['MASTER_PORT'] = '29406'
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
         warnings.warn(
@@ -463,7 +463,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post"
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post_long"
 
     if local_rank == 0:
         if args.track:
@@ -500,7 +500,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     torch.backends.cudnn.allow_tf32 = False
 
     if len(args.device_ids) > 0:
-        assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
         device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
     else:
         device_count = torch.cuda.device_count()
@@ -512,7 +511,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # env setup
     init_jvm()
 
-    print("Thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+    print("local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
 
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
@@ -581,7 +580,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
-            if global_step > 200000000:
+            if global_step > 1000000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1
@@ -658,7 +657,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             for info in infos:
                 if "episode" in info.keys() and local_rank == 0:
-                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}, episode_winner={'player_0' if info['result'] == 1 else 'player_1'}")
+                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                     writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                     break
