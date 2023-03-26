@@ -26,6 +26,7 @@ import copy
 
 from IPython import embed
 import torch.nn.functional as F
+from trueskill import Rating, quality_1vs1, rate_1vs1
 
 from envs_folder.custom_env import CustomLuxEnv
 
@@ -59,7 +60,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=100000000000,
+    parser.add_argument("--total-timesteps", type=int, default=500000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -103,6 +104,8 @@ def parse_args():
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")
+    parser.add_argument('--use-trueskill', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+                            help="use trueskill in the pool")                            
     parser.add_argument('--save-every', type=int, default=25,
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--pool-size', type=int, default=5,
@@ -225,10 +228,10 @@ class ConvSequence(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
-        #x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
+        x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         x = self.res_block0(x)
         x = self.res_block1(x)
-        #assert x.shape[1:] == self.get_output_shape()
+        assert x.shape[1:] == self.get_output_shape()
         return x
 
     def get_output_shape(self):
@@ -241,11 +244,23 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.Conv2d(128, output_channels, 1, stride=1)),
+            layer_init(nn.ConvTranspose2d(128, 128, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)),
+            nn.ReLU(),
+            layer_init(nn.ConvTranspose2d(32, output_channels, 3, stride=2, padding=1, output_padding=1)),
             Transpose((0, 2, 3, 1)),
         )
-        
+
+        self.fc_dec = nn.Sequential(
+            nn.Linear(256, 128 * 3 * 3),
+        )
+
     def forward(self, x):
+        x = self.fc_dec(x)
+        x = x.view(-1, 128, 3, 3)
         return self.deconv(x)
 
 
@@ -262,12 +277,22 @@ class Agent(nn.Module):
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
 
+        conv_seqs += [
+            nn.Flatten(),
+            nn.ReLU(),
+            nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256),
+            nn.ReLU(),
+        ]
+
         self.encoder = nn.Sequential(*conv_seqs)
 
         self.actor_robots = Decoder(22)
         self.actor_factories = Decoder(4)
 
         self.critic = nn.Sequential(
+            nn.Flatten(),
+            layer_init(nn.Linear(256, 128), std=1),
+            nn.ReLU(),
             layer_init(nn.Linear(128, 1), std=1),
         )
     
@@ -279,6 +304,20 @@ class Agent(nn.Module):
 
         if count >= pool_size:
             os.remove(os.path.join(path, ckpts[0]))
+
+    def load_checkpoint_with_skill(self, path):
+        ckpts = os.listdir(path)
+        ckpts.sort(key=lambda f: int(f.split(".")[0]))
+        skills = [agents_skill[idx.split(".")[0]].mu for idx in ckpts]
+        skills = np.exp(skills)/sum(np.exp(skills))
+        
+        enemy = np.random.choice(ckpts, p=skills)
+        weights = torch.load(os.path.join(path, enemy))
+
+        self.load_state_dict(weights)
+        self.freeze_params()
+
+        return enemy
 
     def load_checkpoint(self, path):
         ckpts = os.listdir(path)
@@ -410,9 +449,7 @@ class Agent(nn.Module):
         return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
 
     def get_value(self, x):
-        x = self.forward(x)
-        x = F.avg_pool2d(x, kernel_size=x.size()[2:4]).flatten(start_dim=1, end_dim=-1)
-        return self.critic(x)
+        return self.critic(self.forward(x))
 
 
 if __name__ == "__main__":
@@ -428,7 +465,7 @@ if __name__ == "__main__":
     
     if world_size > 1:
         # set the port number
-        #os.environ['MASTER_PORT'] = '29406'
+        os.environ['MASTER_PORT'] = '29406'
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
         warnings.warn(
@@ -480,6 +517,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     torch.backends.cudnn.allow_tf32 = False
 
     if len(args.device_ids) > 0:
+        assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
         device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
     else:
         device_count = torch.cuda.device_count()
@@ -491,18 +529,24 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # env setup
     init_jvm()
 
-    print("local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+    print("Thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
 
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
     agent = Agent(envs).to(device)
 
     if local_rank == 0:
-
-        # start self-play
+        agents_skill = {
+            "main" : Rating()
+        }
+        # start self-play pool
         num_models_saved = 0
-        agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
-        num_models_saved += 1
+        for i in range(args.pool_size):
+            pool_agent = Agent().to(device)
+            pool_agent.freeze_params()
+            pool_agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+            agents_skill[str(num_models_saved)] = Rating()
+            num_models_saved += 1
 
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -515,7 +559,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         enemy_agent = Agent().to(device)
         enemy_agent.freeze_params()
         envs.envs[i].set_enemy_agent(enemy_agent)
-
 
     # ALGO Logic: Storage for epoch data
     mapsize = 48 * 48
@@ -560,7 +603,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
-            if global_step > 1000000000:
+            if global_step > 200000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1
@@ -637,7 +680,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             for info in infos:
                 if "episode" in info.keys() and local_rank == 0:
-                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+                    print(f"global_step={global_step}, episode_reward={info['episode']['r']}, episode_winner={'player_0' if info['result'] == 1 else 'player_1'}")
                     writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                     break
