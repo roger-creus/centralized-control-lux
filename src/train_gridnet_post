@@ -18,7 +18,7 @@ conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-torchrun --standalone --nnodes 1 --nproc_per_node 14 ppo_res_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 112 --num-steps 64 --eval-interval 50 --save-every 25 --device-ids 0 0 1 1 2 2 3 3 4 4 5 5 6 6
+torchrun --standalone --nnodes 1 --nproc_per_node 14 ppo_final_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 112 --num-steps 64 --eval-interval 50 --save-every 25 --device-ids 0 0 1 1 2 2 3 3 4 4 5 5 6 6
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/

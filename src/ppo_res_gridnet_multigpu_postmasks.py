@@ -448,7 +448,7 @@ if __name__ == "__main__":
     
     if world_size > 1:
         # set the port number
-        #os.environ['MASTER_PORT'] = '29406'
+        os.environ['MASTER_PORT'] = '29401'
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
         warnings.warn(

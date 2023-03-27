@@ -2,26 +2,32 @@
 #SBATCH --partition=long
 #SBATCH --nodes=2
 #SBATCH --gres=gpu:rtx8000:1
-#SBATCH --exclude=cn-a001,cn-a002,cn-a003,cn-a004,cn-a005,cn-a006,cn-a007,cn-a008,cn-a009,cn-a010,cn-a011,cn-b001,cn-b002,cn-b003,cn-b004,cn-b005,cn-g001,cn-g002,cn-g003,cn-g004,cn-g005,cn-g006,cn-g007,cn-g008,cn-g009,cn-g010,cn-g011,cn-g012,cn-g013,cn-g014,cn-g015,cn-g016,cn-g017,cn-g018,cn-g019,cn-g020,cn-g021,cn-g022,cn-g023,cn-g024,cn-g025,cn-g026,cn-d001,cn-d002,cn-d003,cn-d004,cn-e002,cn-e003,cn-f001,cn-f002,cn-f003,cn-f004,cn-h001,cn-h002,cn-h003,cn-h004
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=25G
-#SBATCH --time=1:00:00                                           
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=10G
+#SBATCH --time=2:00:00                                           
 #SBATCH -o /network/scratch/r/roger.creus-castanyer/slurm-%j.out 
 
 # 1. Load your environment
 module load anaconda/3
 
-export OMP_NUM_THREADS=2
+### change 5-digit MASTER_PORT as you wish, slurm will raise Error if duplicated with others
+export MASTER_PORT=12340
 
-#export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/
+### change WORLD_SIZE as gpus/node * num_nodes
+export WORLD_SIZE=2
+
+echo "NODELIST="${SLURM_NODELIST}
+master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_ADDR=$master_addr
+echo "MASTER_ADDR="$MASTER_ADDR
 
 conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-torchrun --standalone --nnodes 2 --nproc_per_node 2 ppo_res_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 32 --num-steps 64 --eval-interval 50 --save-every 25 --device-ids 0 0
+srun python3 ppo_final_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 2 --num-steps 64 --eval-interval 50 --save-every 25
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/

@@ -415,37 +415,79 @@ class Agent(nn.Module):
         return self.critic(x)
 
 
+def world_info_from_env():
+    local_rank = 0
+    for v in ('LOCAL_RANK', 'MPI_LOCALRANKID', 'SLURM_LOCALID', 'OMPI_COMM_WORLD_LOCAL_RANK'):
+        if v in os.environ:
+            local_rank = int(os.environ[v])
+            break
+    global_rank = 0
+    for v in ('RANK', 'PMI_RANK', 'SLURM_PROCID', 'OMPI_COMM_WORLD_RANK'):
+        if v in os.environ:
+            global_rank = int(os.environ[v])
+            break
+    world_size = 1
+    for v in ('WORLD_SIZE', 'PMI_SIZE', 'SLURM_NTASKS', 'OMPI_COMM_WORLD_SIZE'):
+        if v in os.environ:
+            world_size = int(os.environ[v])
+            break
+
+    return local_rank, global_rank, world_size
+
 if __name__ == "__main__":
+
     # torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # taken from https://pytorch.org/docs/stable/elastic/run.html
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    #local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    #world_rank = int(os.environ['RANK'])
+    #world_size = int(os.getenv("WORLD_SIZE", "1"))
+
+    #print(local_rank, world_rank, world_size)
+
     args = parse_args()
-    args.world_size = world_size
+    
+    if 'SLURM_PROCID' in os.environ:
+        args.local_rank, args.rank, args.world_size = world_info_from_env()
+        # SLURM var -> torch.distributed vars in case needed
+        os.environ['LOCAL_RANK'] = str(args.local_rank)
+        os.environ['RANK'] = str(args.rank)
+        os.environ['WORLD_SIZE'] = str(args.world_size)
+        torch.distributed.init_process_group(
+            backend=args.backend,
+            world_size=args.world_size,
+            rank=args.rank,
+        )
+
+    #args.world_size = world_size
+    world_size = args.world_size
+    local_rank = args.local_rank
+    world_rank = args.rank
+    
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     
-    if world_size > 1:
-        # set the port number
-        #os.environ['MASTER_PORT'] = '29406'
-        dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
-    else:
-        warnings.warn(
-            """
-Not using distributed mode!
-If you want to use distributed mode, please execute this script with 'torchrun'.
-E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py`
-        """
-        )
-    print(f"================================")
+#     if world_size > 1:
+#         # set the port number
+#         #os.environ['MASTER_PORT'] = '29406'
+#         dist.init_process_group(args.backend, rank=world_rank, world_size=world_size)
+#     else:
+#         warnings.warn(
+#             """
+# Not using distributed mode!
+# If you want to use distributed mode, please execute this script with 'torchrun'.
+# E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py`
+#         """
+#         )
+#     print(f"================================")
+
     print(f"args.num_envs: {args.num_envs}, args.batch_size: {args.batch_size}, args.minibatch_size: {args.minibatch_size}")
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_gridnet_post"
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post_final"
 
-    if local_rank == 0:
+    if world_rank == 0:
         if args.track:
             import wandb
 
@@ -469,35 +511,40 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     # TRY NOT TO MODIFY: seeding
     # CRUCIAL: note that we needed to pass a different seed for each data parallelism worker
-    args.seed += local_rank
+    args.seed += world_rank
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed - local_rank)
+    torch.manual_seed(args.seed - world_rank)
     torch.backends.cudnn.deterministic = args.torch_deterministic
     #torch.backends.cudnn.deterministic = True
     #torch.backends.cudnn.benchmark = False
     #torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.allow_tf32 = False
 
-    if len(args.device_ids) > 0:
-        device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
-    else:
-        device_count = torch.cuda.device_count()
-        if device_count < world_size:
-            device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-        else:
-            device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() and args.cuda else "cpu")
+    # if len(args.device_ids) > 0:
+    #     device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
+    # else:
+    #     device_count = torch.cuda.device_count()
+    #     if device_count < world_size:
+    #         device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    #     else:
+    #         device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() and args.cuda else "cpu")
+
+
+    device = args.rank % torch.cuda.device_count()
 
     # env setup
     init_jvm()
 
-    print("local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+    print("world_size", world_size)
+    print("global thread", world_rank, " which is local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
+    dist.barrier()
 
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
 
     agent = Agent(envs).to(device)
 
-    if local_rank == 0:
+    if world_rank == 0:
 
         # start self-play
         num_models_saved = 0
@@ -508,8 +555,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # all threads will wait for jvm to be initialized and initial checkpoint to exist
-    if world_size > 1:
-        dist.barrier()
+    #if world_size > 1:
+    #    dist.barrier()
 
     for i in range(len(envs.envs)):
         enemy_agent = Agent().to(device)
@@ -543,7 +590,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // (args.batch_size * world_size)
 
-    if local_rank == 0:
+    if world_rank == 0:
         print("Model's state_dict:")
         for param_tensor in agent.state_dict():
             print(param_tensor, "\t", agent.state_dict()[param_tensor].size())
@@ -560,7 +607,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
-            if global_step > 1000000000:
+            if global_step > 100000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1
@@ -636,7 +683,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
             for info in infos:
-                if "episode" in info.keys() and local_rank == 0:
+                if "episode" in info.keys() and world_rank == 0:
                     print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                     writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
@@ -751,7 +798,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-        if local_rank == 0:
+        if world_rank == 0:
             if update % args.save_every == 0:
                 agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
                 num_models_saved += 1
@@ -831,15 +878,15 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 envs_test.close()
                 agent.unfreeze_params()    
 
-        if world_size > 1:
-            dist.barrier()
+        #if world_size > 1:
+        #    dist.barrier()
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if local_rank == 0:
+        if world_rank == 0:
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
@@ -850,7 +897,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     envs.close()
-    if local_rank == 0:
+    if world_rank == 0:
         writer.close()
         if args.track:
             wandb.finish()
