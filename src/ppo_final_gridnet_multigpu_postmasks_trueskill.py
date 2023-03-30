@@ -20,6 +20,8 @@ import time
 import random
 import os
 import jpype
+
+from trueskill import Rating, quality_1vs1, rate_1vs1
 from jpype.types import JArray, JInt
 
 import copy
@@ -81,7 +83,7 @@ def parse_args():
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.1,
+    parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -279,6 +281,40 @@ class Agent(nn.Module):
 
         if count >= pool_size:
             os.remove(os.path.join(path, ckpts[0]))
+            
+    def save_checkpoint_with_skill(self, idx, pool_size, path):
+        ckpts = os.listdir(path)
+        ckpts.sort(key=lambda f: int(f.split(".")[0]))
+        skills = [agents_skill[idx.split(".")[0]].mu for idx in ckpts]
+        
+        worst_enemy_skill = min(skills)
+        worst_enemy_idx = skills.index(worst_enemy_skill)
+        
+        os.remove(os.path.join(path, ckpts[worst_enemy_idx]))
+        
+        del agents_skill[str(worst_enemy_idx)]
+        
+        torch.save(self.state_dict(), os.path.join(path, str(idx) + ".pt"))
+        
+        # the new agent in the pool has the same skill as the main had.
+        # MAINLY because its the same checkpoint at the same step
+        agents_skill[str(idx)] = agents_skill["main"]
+
+        return enemy_idx
+
+    def load_checkpoint_with_skill(self, path):
+        ckpts = os.listdir(path)
+        ckpts.sort(key=lambda f: int(f.split(".")[0]))
+        skills = [agents_skill[idx.split(".")[0]].mu for idx in ckpts]
+        skills = np.exp(skills)/sum(np.exp(skills))
+        
+        enemy_idx = np.random.choice(ckpts, p=skills)
+        weights = torch.load(os.path.join(path, enemy_idx))
+
+        self.load_state_dict(weights)
+        self.freeze_params()
+
+        return enemy_idx
 
     def load_checkpoint(self, path):
         ckpts = os.listdir(path)
@@ -415,25 +451,6 @@ class Agent(nn.Module):
         return self.critic(x)
 
 
-def world_info_from_env():
-    local_rank = 0
-    for v in ('LOCAL_RANK', 'MPI_LOCALRANKID', 'SLURM_LOCALID', 'OMPI_COMM_WORLD_LOCAL_RANK'):
-        if v in os.environ:
-            local_rank = int(os.environ[v])
-            break
-    global_rank = 0
-    for v in ('RANK', 'PMI_RANK', 'SLURM_PROCID', 'OMPI_COMM_WORLD_RANK'):
-        if v in os.environ:
-            global_rank = int(os.environ[v])
-            break
-    world_size = 1
-    for v in ('WORLD_SIZE', 'PMI_SIZE', 'SLURM_NTASKS', 'OMPI_COMM_WORLD_SIZE'):
-        if v in os.environ:
-            world_size = int(os.environ[v])
-            break
-
-    return local_rank, global_rank, world_size
-
 if __name__ == "__main__":
 
     # torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
@@ -467,7 +484,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints"
+    PATH_AGENT_CHECKPOINTS = "/home/roger/Desktop/lux-ai-rl/src/checkpoints_skill"
 
     if local_rank == 0:
         if args.track:
@@ -522,24 +539,26 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     agent = Agent(envs).to(device)
 
     if local_rank == 0:
-
-        # start self-play
+        agents_skill = {
+            "main" : Rating()
+        }
+        # start self-play pool
         num_models_saved = 0
-        agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
-        num_models_saved += 1
+        for i in range(args.pool_size):
+            pool_agent = Agent().to(device)
+            pool_agent.freeze_params()
+            pool_agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+            agents_skill[str(num_models_saved)] = Rating()
+            num_models_saved += 1
 
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # all threads will wait for jvm to be initialized and initial checkpoint to exist
-    #if world_size > 1:
-    #    dist.barrier()
-
     for i in range(len(envs.envs)):
         enemy_agent = Agent().to(device)
-        enemy_agent.freeze_params()
+        enemy_idx = enemy_agent.load_checkpoint_with_skill(PATH_AGENT_CHECKPOINTS)
         envs.envs[i].set_enemy_agent(enemy_agent)
-
+        envs.envs[i].set_enemy_idx(enemy_idx)
 
     # ALGO Logic: Storage for epoch data
     mapsize = 48 * 48
@@ -659,12 +678,27 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
+            # update trueskill after each game depending on W/L/D
+            env_idx = 0
             for info in infos:
+                if "result" in info.keys():
+                    opponent_idx = envs.envs[env_idx].enemy_idx.split(".")[0]
+                    if info["result"] == 1:
+                        agents_skill["main"], agents_skill[opponent_idx] = rate_1vs1(agents_skill["main"], agents_skill[opponent_idx])
+                    elif info["result"] == -1:
+                        agents_skill["main"], agents_skill[opponent_idx] = rate_1vs1(agents_skill[opponent_idx],agents_skill["main"])
+                    elif info["result"] == 0:
+                        agents_skill["main"], agents_skill[opponent_idx] = rate_1vs1(agents_skill["main"], agents_skill[opponent_idx], drawn=True)
+                        
+                env_idx += 1
+            
+            for info in infos:                    
                 if "episode" in info.keys() and local_rank == 0:
                     print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
                     writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                     break
+
 
         # bootstrap reward if not done. reached the batch limit
         with torch.no_grad():
@@ -777,7 +811,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
         if local_rank == 0:
             if update % args.save_every == 0:
-                agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
+                agent.save_checkpoint_with_skill(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
                 num_models_saved += 1
 
             # Evaluation!
@@ -855,16 +889,23 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 envs_test.close()
                 agent.unfreeze_params()    
 
-        #if world_size > 1:
-        #    dist.barrier()
-
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if local_rank == 0:
+            mean_pop_skill = np.mean([p.mu for p in list(agents_skill.values())])
+            mean_non_main_skill = np.mean([p.mu for p in list(agents_skill.values())[1:]])
+            main_p_skill = agents_skill["main"].mu
+            
+            max_pop_skill = np.max([p.mu for p in list(agents_skill.values())])
+            
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+            writer.add_scalar("population/mean_pop_skill", mean_pop_skill, global_step)
+            writer.add_scalar("population/mean_pop_no_main_skill", mean_non_main_skill, global_step)
+            writer.add_scalar("population/main_player_skill", main_p_skill, global_step)
+            writer.add_scalar("population/max_skill", max_pop_skill, global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
             writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)

@@ -111,21 +111,32 @@ class CustomLuxEnv(gym.Env):
         observations, reward, done, info = self.env_.step(actions)
 
         if reward["player_0"] == -1000:
-            if self.is_sparse_reward:
-                reward_now = -1
-            else:
+            # if players have drawn
+            if reward["player_1"] == -1000:
+                info["player_0"]["result"] = 0
                 reward_now = 0
-
-            info["player_0"]["result"] = -1
+            
+            # else, player 1 has lost
+            else:
+                if self.is_sparse_reward:
+                    reward_now = -1
+                else:
+                    reward_now = 0
+                    
+                info["player_0"]["result"] = -1
         
         elif reward["player_1"] == -1000:
-            if self.is_sparse_reward:
-                reward_now = 1
-            else:
+            # if players have drawn
+            if reward["player_0"] == -1000:
                 reward_now = 0
-
-            info["player_0"]["result"] = 1
-        
+                info["player_0"]["result"] = 0
+            # else, player 1 has won
+            else:
+                if self.is_sparse_reward:
+                    reward_now = 1
+                else:
+                    reward_now = 0
+                info["player_0"]["result"] = 1
         else:
             if self.is_sparse_reward:
                 reward_now = 0
@@ -989,12 +1000,15 @@ class CustomLuxEnv(gym.Env):
     def set_enemy_agent(self, agent):
         self.enemy_agent = agent
     
+    def set_enemy_idx(self, idx):
+        self.enemy_idx = idx
+    
     def set_sparse_reward(self):
         self.is_sparse_reward = True
 
     def update_enemy_agent(self):
         try:
-            self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
+            self.enemy_idx = self.enemy_agent.load_checkpoint_with_skill(self.PATH_AGENT_CHECKPOINTS)
             self.enemy_agent.freeze_params()
         except:
             print(self.PATH_AGENT_CHECKPOINTS)
