@@ -166,17 +166,35 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+class SqEx(nn.Module):
+    def __init__(self, n_features, reduction=16):
+        super(SqEx, self).__init__()
+        if n_features % reduction != 0:
+            raise ValueError('n_features must be divisible by reduction (default = 16)')
+        self.linear1 = nn.Linear(n_features, n_features // reduction, bias=True)
+        self.nonlin1 = nn.ReLU(inplace=True)
+        self.linear2 = nn.Linear(n_features // reduction, n_features, bias=True)
+        self.nonlin2 = nn.Sigmoid()
+
+    def forward(self, x):
+        y = F.avg_pool2d(x, kernel_size=x.size()[2:4])
+        y = y.permute(0, 2, 3, 1)
+        y = self.nonlin1(self.linear1(y))
+        y = self.nonlin2(self.linear2(y))
+        y = y.permute(0, 3, 1, 2)
+        y = x * y
+        return y
+
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
+
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
 
@@ -242,16 +260,12 @@ class Agent(nn.Module):
         factor = 2 if bilinear else 1
         self.down4 = (Down(256, 512 // factor))
 
-        self.up1_r = (Up(512, 256 // factor, bilinear))
-        self.up2_r = (Up(256, 128 // factor, bilinear))
-        self.up3_r = (Up(128, 64 // factor, bilinear))
-        self.up4_r = (Up(64, 32, bilinear))
-        self.outc_r = (OutConv(32, 29))
-
-        self.up1_f = (Up(512, 256 // factor, bilinear))
-        self.up2_f = (Up(256, 128 // factor, bilinear))
-        self.up3_f = (Up(128, 64 // factor, bilinear))
-        self.up4_f = (Up(64, 32, bilinear))
+        self.up1 = (Up(512, 256 // factor, bilinear))
+        self.up2 = (Up(256, 128 // factor, bilinear))
+        self.up3 = (Up(128, 64 // factor, bilinear))
+        self.up4 = (Up(64, 32, bilinear))
+        
+        self.outc_r = (OutConv(32, 22))
         self.outc_f = (OutConv(32, 4))
 
         self.critic = nn.Sequential(
@@ -301,23 +315,30 @@ class Agent(nn.Module):
         x3 = self.down2(x2)
         x4 = self.down3(x3)
         x5 = self.down4(x4)
-        return x1, x2, x3, x4, x5
-    
-    def forward_robots(self, x1, x2, x3, x4, x5):
-        x = self.up1_r(x5, x4)
-        x = self.up2_r(x, x3)
-        x = self.up3_r(x, x2)
-        x = self.up4_r(x, x1)
-        logits = self.outc_r(x)
-        return logits
 
-    def forward_factories(self, x1, x2, x3, x4, x5):
-        x = self.up1_f(x5, x4)
-        x = self.up2_f(x, x3)
-        x = self.up3_f(x, x2)
-        x = self.up4_f(x, x1)
-        logits = self.outc_f(x)
-        return logits
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+
+        return x
+
+    def encode(self, x):
+        x = x.permute(0,3,1,2)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+
+        return x1, x2, x3, x4, x5
+
+    
+    def forward_robots(self, x):
+        return self.outc_r(x)
+
+    def forward_factories(self, x):
+        return self.outc_f(x)
 
     def get_action(
             self,
@@ -349,13 +370,13 @@ class Agent(nn.Module):
         else:
             print(type(envs_))
 
-        x1, x2, x3, x4, x5 = self(obs)
+        x = self(obs)
         
-        robot_logits = self.forward_robots(x1, x2, x3, x4, x5)
+        robot_logits = self.forward_robots(x)
         robot_grid_logits = robot_logits.reshape(-1, robots_nvec_sum)
         robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist, dim=1)
 
-        factory_logits = self.forward_factories(x1, x2, x3, x4, x5)
+        factory_logits = self.forward_factories(x)
         factory_grid_logits = factory_logits.reshape(-1, factories_nvec_sum)
         factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
 
@@ -412,7 +433,7 @@ class Agent(nn.Module):
         return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
 
     def get_value(self, x):
-        _, _, _, x4, x5 = self.forward(x)
+        _, _, _, _, x5 = self.encode(x)
         return self.critic(x5)
 
 

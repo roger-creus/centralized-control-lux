@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --partition=lab-real
-#SBATCH --cpus-per-task=56
-#SBATCH --gres=gpu:a6000:7                              
-#SBATCH --mem=800G                                       
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1                              
+#SBATCH --mem=50G                                       
 #SBATCH --time=500:00:00                                           
 #SBATCH -o /network/scratch/r/roger.creus-castanyer/slurm-%j.out 
 
@@ -18,7 +18,8 @@ conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-torchrun --standalone --nnodes 1 --nproc_per_node 14 ppo_final_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 112 --num-steps 64 --eval-interval 50 --save-every 25 --device-ids 0 0 1 1 2 2 3 3 4 4 5 5 6 6
+#torchrun --standalone --nnodes 1 --nproc_per_node 1 ppo_res_gridnet_multigpu.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 16 --num-steps 128 --eval-interval 50 --save-every 25 --device-ids 0
+wandb agent rogercreus/lux/t5n80l0n
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/

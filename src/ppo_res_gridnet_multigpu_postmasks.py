@@ -47,7 +47,7 @@ def parse_args():
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, cuda will be enabled by default")
-    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
     parser.add_argument("--wandb-project-name", type=str, default="lux",
         help="the wandb's project name")
@@ -59,7 +59,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=100000000000,
+    parser.add_argument("--total-timesteps", type=int, default=10000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -71,12 +71,14 @@ def parse_args():
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
+    parser.add_argument("--num-channels", type=int, default=32,
+        help="the discount factor gamma")
+    parser.add_argument("--minibatch-size", type=int, default=32,
+        help="the discount factor gamma")
     parser.add_argument("--gae-lambda", type=float, default=0.95,
         help="the lambda for the general advantage estimation")
     parser.add_argument('--gae', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True,
         help='Use GAE for advantage computation')
-    parser.add_argument("--num-minibatches", type=int, default=4,
-        help="the number of mini-batches")
     parser.add_argument("--update-epochs", type=int, default=4,
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
@@ -109,14 +111,13 @@ def parse_args():
                             help="how many checkpoints to keep")
     parser.add_argument('--sparse-reward', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                             help="weather to use sparse reward")
-    parser.add_argument('--eval-interval', type=int, default=10, 
+    parser.add_argument('--eval-interval', type=int, default=250, 
                             help="how many updates between eval")
     parser.add_argument('--simple-obs', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                             help="how many updates between eval")
     
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
     # fmt: on
     return args
 
@@ -222,12 +223,16 @@ class ConvSequence(nn.Module):
         self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1)
         self.res_block0 = ResBlockSqEx(self._out_channels)
         self.res_block1 = ResBlockSqEx(self._out_channels)
+        # self.res_block2 = ResBlockSqEx(self._out_channels)
+        # self.res_block3 = ResBlockSqEx(self._out_channels)
 
     def forward(self, x):
         x = self.conv(x)
         x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         x = self.res_block0(x)
         x = self.res_block1(x)
+        # x = self.res_block2(x)
+        # x = self.res_block3(x)
         assert x.shape[1:] == self.get_output_shape()
         return x
 
@@ -241,23 +246,23 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.ConvTranspose2d(128, 128, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(args.num_channels * 4, args.num_channels * 4, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(args.num_channels * 4, args.num_channels * 2, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(args.num_channels * 2, args.num_channels, 3, stride=2, padding=1, output_padding=1)),
             nn.ReLU(),
-            layer_init(nn.ConvTranspose2d(32, output_channels, 3, stride=2, padding=1, output_padding=1)),
+            layer_init(nn.ConvTranspose2d(args.num_channels, output_channels, 3, stride=2, padding=1, output_padding=1)),
             Transpose((0, 2, 3, 1)),
         )
 
         self.fc_dec = nn.Sequential(
-            nn.Linear(256, 128 * 3 * 3),
+            nn.Linear(args.num_channels * 4, args.num_channels * 4 * 3 * 3),
         )
 
     def forward(self, x):
         x = self.fc_dec(x)
-        x = x.view(-1, 128, 3, 3)
+        x = x.view(-1, args.num_channels * 4, 3, 3)
         return self.deconv(x)
 
 
@@ -269,7 +274,7 @@ class Agent(nn.Module):
 
         shape = (c, h, w)
         conv_seqs = []
-        for out_channels in [32, 64, 128, 256]:
+        for out_channels in [args.num_channels, args.num_channels * 2, args.num_channels * 4, args.num_channels * 8]:
             conv_seq = ConvSequence(shape, out_channels)
             shape = conv_seq.get_output_shape()
             conv_seqs.append(conv_seq)
@@ -277,7 +282,7 @@ class Agent(nn.Module):
         conv_seqs += [
             nn.Flatten(),
             nn.ReLU(),
-            nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=256),
+            nn.Linear(in_features=shape[0] * shape[1] * shape[2], out_features=args.num_channels * 4),
             nn.ReLU(),
         ]
 
@@ -288,9 +293,9 @@ class Agent(nn.Module):
 
         self.critic = nn.Sequential(
             nn.Flatten(),
-            layer_init(nn.Linear(256, 128), std=1),
+            layer_init(nn.Linear(args.num_channels * 4, args.num_channels * 4), std=1),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 1), std=1),
+            layer_init(nn.Linear(args.num_channels * 4, 1), std=1),
         )
     
     def save_checkpoint(self, idx, pool_size, path):
@@ -444,7 +449,6 @@ if __name__ == "__main__":
     args.world_size = world_size
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
     
     if world_size > 1:
         # set the port number
@@ -463,7 +467,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_gridnet_post_long"
+    rdx_idx = np.random.randint(100000)
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_" + str(rdx_idx)
 
     if local_rank == 0:
         if args.track:
