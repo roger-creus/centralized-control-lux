@@ -34,6 +34,29 @@ torchrun --standalone --nproc_per_node 1 ppo_res_gridnet_multigpu.py --device-id
 ```
 
 
+The best agent was trained using the best parameters discovered in the [hyperparameter sweep](www.google.com) and 16 processes on 8 GPUs, running:
+
+```
+torchrun --standalone --nproc_per_node 16 ppo_pixel_gridnet_multigpu.py 
+--total-timesteps 1000000000 
+--clip-coef=0.14334778465053272 
+--ent-coef=0.002408486638907176 
+--gae-lambda=0.9322312137190516
+--gamma=0.9945973988514306
+--learning-rate=0.0016166261475302418 
+--max-grad-norm=0.28978755223510055 
+--minibatch-size=128
+--num-envs=256 
+--num-steps=64 
+--pool-size=5 
+--save-every=50 
+--update-epochs=7 
+--vf-coef=0.2734614814048212 
+--device-ids 0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7
+
+```
+
+
 
 ### Description
 
