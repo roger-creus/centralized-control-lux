@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Creus Castanyer"
+  given-names: "Roger"
+  orcid: "https://orcid.org/0000-0003-1952-3357"
+title: "Centralized Control for Multi-Agent RL in a complex Real-Time-Strategy game"
+version: 1.0.0
+date-released: 2023-04-28
+url: "https://github.com/roger-creus/lux-ai-rl"
