@@ -67,7 +67,7 @@ In this project we implement an RL agent to compete in the [Lux AI v-2 Kaggle Co
 We propose a pixel-to-pixel architecture that we train with Proximal Policy Optimization (PPO). The encoder is a stack of Residual Blocks with Squeeze-and-Excitation layers and ReLU activations and the decoders are both a stack of Transposed Convolutions and ReLU actiovations. The critic uses and AveragePool layer and 2 fully connected layers with a ReLU activation.
 
 <div align="center">
-  <img src="imgs/arch.png" alt="The centralized agent" width="50%" />
+  <img src="imgs/arch.png" alt="The centralized agent" width="75%" />
 </div>
 
 
