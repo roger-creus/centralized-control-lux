@@ -47,7 +47,7 @@ def parse_args():
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, cuda will be enabled by default")
-    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
     parser.add_argument("--wandb-project-name", type=str, default="lux",
         help="the wandb's project name")
@@ -138,11 +138,6 @@ def make_env(seed, self_play, sparse_reward, simple_obs, device):
         return env
     return thunk
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
 # define the learning agent and utilities
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
@@ -198,9 +193,9 @@ class ResBlockSqEx(nn.Module):
         super(ResBlockSqEx, self).__init__()
         # convolutions
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv1 = layer_init(nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False))
+        self.conv1 = nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = layer_init(nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False))
+        self.conv2 = nn.Conv2d(n_features, n_features, kernel_size=3, stride=1, padding=1, bias=False)
 
         # squeeze and excitation
         self.sqex  = SqEx(n_features)
@@ -220,7 +215,7 @@ class ConvSequence(nn.Module):
         super().__init__()
         self._input_shape = input_shape
         self._out_channels = out_channels
-        self.conv = layer_init(nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1))
+        self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1)
         self.res_block0 = ResBlockSqEx(self._out_channels)
         self.res_block1 = ResBlockSqEx(self._out_channels)
 
@@ -239,7 +234,7 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            layer_init(nn.Conv2d(args.num_channels * 8, output_channels, 1, stride=1)),
+            nn.Conv2d(args.num_channels * 8, output_channels, 1, stride=1),
             Transpose((0, 2, 3, 1)),
         )
         
@@ -414,7 +409,6 @@ if __name__ == "__main__":
     args.world_size = world_size
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
-    #os.environ['MASTER_PORT'] = '29409'
 
     if world_size > 1:
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)

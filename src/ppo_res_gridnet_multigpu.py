@@ -3,41 +3,33 @@ import os
 import random
 import time
 import warnings
-from distutils.util import strtobool
-
 import gym
 import numpy as np
+import jpype
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+import copy
+import torch.nn.functional as F
+import sys
+
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
-
 from gym.wrappers import TimeLimit, Monitor, NormalizeObservation
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
-import time
-import random
-import os
-import jpype
+from distutils.util import strtobool
 from jpype.types import JArray, JInt
-
-import copy
-
 from IPython import embed
-import torch.nn.functional as F
 
 from envs_folder.custom_env import CustomLuxEnv
-
-import os
-import sys
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 from invalid_action_masks import *
 from utils import *
 
 
+# read all the hyperparameters for the training
 def parse_args():
-    # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"),
         help="the name of this experiment")
@@ -56,7 +48,7 @@ def parse_args():
     parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
-    # Algorithm specific arguments
+    # algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="Lux-Multigpu",
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=10000000,
@@ -100,8 +92,8 @@ def parse_args():
     parser.add_argument("--backend", type=str, default="gloo", choices=["gloo", "nccl", "mpi"],
         help="the id of the environment")
 
-    # self-play specs
-    parser.add_argument('--save-path', type=str, default="outputs",
+    # environment + self-play specs
+    parser.add_argument('--save-path', type=str, default="/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_final_small",
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")
@@ -118,7 +110,6 @@ def parse_args():
     
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
-    # fmt: on
     return args
 
 # utility for JArrays
@@ -130,7 +121,12 @@ def init_jvm(jvmpath=None):
 # utility to create Vectorized env
 def make_env(seed, self_play, sparse_reward, simple_obs, device):
     def thunk():
-        env = CustomLuxEnv(self_play=self_play, sparse_reward = sparse_reward, simple_obs = simple_obs, device=device, PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS)
+        env = CustomLuxEnv(
+            self_play=self_play,
+            sparse_reward = sparse_reward,
+            simple_obs = simple_obs, device=device,
+            PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS,
+        )
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
@@ -138,12 +134,13 @@ def make_env(seed, self_play, sparse_reward, simple_obs, device):
         return env
     return thunk
 
+# utility to initialize some layers
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-# define the learning agent and utilities
+# categorical distribution with invalid action masking (masking logits to -inf -> logprob -> 0)
 class CategoricalMasked(Categorical):
     def __init__(self, probs=None, logits=None, validate_args=None, masks=[], sw=None):
         self.masks = masks
@@ -161,6 +158,7 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.masks, p_log_p, torch.tensor(0.).to(device))
         return -p_log_p.sum(-1)
 
+# utility for the model
 class Transpose(nn.Module):
     def __init__(self, permutation):
         super().__init__()
@@ -169,11 +167,7 @@ class Transpose(nn.Module):
     def forward(self, x):
         return x.permute(self.permutation)
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
+# Squeeze-and-Excitation layers
 class SqEx(nn.Module):
     def __init__(self, n_features, reduction=16):
         super(SqEx, self).__init__()
@@ -193,6 +187,7 @@ class SqEx(nn.Module):
         y = x * y
         return y
 
+# ResNet block with squeeze-and-excitation
 class ResBlockSqEx(nn.Module):
     def __init__(self, n_features):
         super(ResBlockSqEx, self).__init__()
@@ -215,6 +210,7 @@ class ResBlockSqEx(nn.Module):
         y = torch.add(x, y)
         return y
 
+# block of 1 ConvLayer + 2 ResNet blocks
 class ConvSequence(nn.Module):
     def __init__(self, input_shape, out_channels):
         super().__init__()
@@ -223,16 +219,13 @@ class ConvSequence(nn.Module):
         self.conv = nn.Conv2d(in_channels=self._input_shape[0], out_channels=self._out_channels, kernel_size=3, padding=1)
         self.res_block0 = ResBlockSqEx(self._out_channels)
         self.res_block1 = ResBlockSqEx(self._out_channels)
-        # self.res_block2 = ResBlockSqEx(self._out_channels)
-        # self.res_block3 = ResBlockSqEx(self._out_channels)
 
     def forward(self, x):
         x = self.conv(x)
+        # downscale x2 operation. See ppo_pixel_gridnet_multigpu.py for avoiding this downscaling.
         x = nn.functional.max_pool2d(x, kernel_size=3, stride=2, padding=1)
         x = self.res_block0(x)
         x = self.res_block1(x)
-        # x = self.res_block2(x)
-        # x = self.res_block3(x)
         assert x.shape[1:] == self.get_output_shape()
         return x
 
@@ -240,7 +233,7 @@ class ConvSequence(nn.Module):
         _c, h, w = self._input_shape
         return (self._out_channels, (h + 1) // 2, (w + 1) // 2)
 
-
+# the actor is a stack of transpose convolutions
 class Decoder(nn.Module):
     def __init__(self, output_channels):
         super().__init__()
@@ -266,12 +259,14 @@ class Decoder(nn.Module):
         return self.deconv(x)
 
 
+# the PPO agent: uses the Resnet encoder, 2 actors for robots and factories and a critic
 class Agent(nn.Module):
     def __init__(self, mapsize=48 * 48):
         super(Agent, self).__init__()
         self.mapsize = mapsize
         h, w, c = envs.single_observation_space.shape
 
+        # the encoder is a stack of ResnetBlocks
         shape = (c, h, w)
         conv_seqs = []
         for out_channels in [args.num_channels, args.num_channels * 2, args.num_channels * 4, args.num_channels * 8]:
@@ -288,9 +283,11 @@ class Agent(nn.Module):
 
         self.encoder = nn.Sequential(*conv_seqs)
 
+        # there are 2 actors
         self.actor_robots = Decoder(22)
         self.actor_factories = Decoder(4)
 
+        # and one critic
         self.critic = nn.Sequential(
             nn.Flatten(),
             layer_init(nn.Linear(args.num_channels * 4, args.num_channels * 4), std=1),
@@ -298,6 +295,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(args.num_channels * 4, 1), std=1),
         )
     
+    # used for self-play and just to save checkpoints as well :)
     def save_checkpoint(self, idx, pool_size, path):
         ckpts = os.listdir(path)
         ckpts.sort(key=lambda f: int(f.split(".")[0]))
@@ -307,6 +305,7 @@ class Agent(nn.Module):
         if count >= pool_size:
             os.remove(os.path.join(path, ckpts[0]))
 
+    # used for self-play
     def load_checkpoint(self, path):
         ckpts = os.listdir(path)
         ckpts.sort(key=lambda f: int(f.split(".")[0]))
@@ -334,6 +333,7 @@ class Agent(nn.Module):
     def forward(self, x):
         return self.encoder(x.permute(0,3,1,2))  # "bhwc" -> "bchw"
 
+    # key method for our agent
     def get_action(
             self,
             obs,
@@ -345,6 +345,10 @@ class Agent(nn.Module):
             player="player_0"
         ):
 
+        # define some variables required for reshaping all the time
+        # the definition of these variables is different between player_0 (learning) and player_1 (opponent)
+
+        # player_0 uses the VectorEnv so needs to access the single_action_space
         if type(envs_) == gym.vector.sync_vector_env.SyncVectorEnv:
             robots_nvec = envs_.single_action_space["robots"].nvec
             robots_nvec_sum = envs_.single_action_space["robots"].nvec[1:].sum()
@@ -353,7 +357,7 @@ class Agent(nn.Module):
             factories_nvec_sum = envs_.single_action_space["factories"].nvec[1:].sum()
             factories_nvec_tolist = envs_.single_action_space["factories"].nvec[1:].tolist()
         
-        # player_1 operates in a single custom env so there is no such thing as single_obs_space
+        # player_1 uses a single custom env so there is no such thing as single_action_space
         elif player == "player_1" or type(envs_) == VideoWrapper:
             robots_nvec = envs_.action_space["robots"].nvec
             robots_nvec_sum = envs_.action_space["robots"].nvec[1:].sum()
@@ -364,85 +368,119 @@ class Agent(nn.Module):
         else:
             print(type(envs_))
 
+        # this is executed both during rollouts and learning
+
+        # encode the observation
         x = self(obs)
         
+        # get the robot logits
         robot_logits = self.actor_robots(x)
         robot_grid_logits = robot_logits.reshape(-1, robots_nvec_sum)
         robot_split_logits = torch.split(robot_grid_logits, robots_nvec_tolist, dim=1)
 
+        # get the factories logits
         factory_logits = self.actor_factories(x)
         factory_grid_logits = factory_logits.reshape(-1, factories_nvec_sum)
         factory_split_logits = torch.split(factory_grid_logits, factories_nvec_tolist, dim=1)
 
+        # this is executed during rollouts only
         if robot_action is None and factory_action is None:
+            
+            #### FACTORIES ####
+            # get the invalid action masks for the current observation
             factory_invalid_action_masks = torch.tensor(get_factory_invalid_action_masks(envs_, player)).to(device)
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:, 1:], factories_nvec_tolist ,dim=1)
+            # with the logits + masks we can get the true logits
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
+            # from the true logits we can sample a valid action at each tile
             factory_action = torch.stack([categorical.sample() for categorical in factory_multi_categoricals])
 
+            #### ROBOTS ####
+            # get the invalid action masks for the current observation
             robot_invalid_action_masks = torch.tensor(get_robot_invalid_action_masks(envs_, player)).to(device)
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:, 1:], robots_nvec_tolist, dim=1)
+            # with the logits + masks we can get the true logits
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
+            # from the true logits we can sample a valid action at each tile
             robot_action = torch.stack([categorical.sample() for categorical in robot_multi_categoricals])
+        
+        # this is executed during learning only (masks and actions are provided from the on-policy buffer)
         else:
+            #### FACTORIES ####
+            # reshaping masks
             factory_invalid_action_masks = factory_invalid_action_masks.view(-1, factory_invalid_action_masks.shape[-1])
             factory_action = factory_action.view(-1, factory_action.shape[-1]).T
             factory_split_invalid_action_masks = torch.split(factory_invalid_action_masks[:, 1:], factories_nvec_tolist,dim=1)
+            # computing the true logits from new computed logits + provided masks
             factory_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(factory_split_logits, factory_split_invalid_action_masks)]
 
+            #### ROBOTS ####
+            # reshaping masks
             robot_invalid_action_masks = robot_invalid_action_masks.view(-1, robot_invalid_action_masks.shape[-1])
             robot_action = robot_action.view(-1, robot_action.shape[-1]).T
             robot_split_invalid_action_masks = torch.split(robot_invalid_action_masks[:, 1:], robots_nvec_tolist,dim=1)
+            # computing the true logits from new computed logits + provided masks
             robot_multi_categoricals = [CategoricalMasked(logits=logits, masks=iam) for (logits, iam) in zip(robot_split_logits, robot_split_invalid_action_masks)]
 
+        # this is executed both during rollouts and learning
+
+        # compute logprobs from valid logits for both robots and factories
         robot_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(robot_action, robot_multi_categoricals)])
         factory_logprob = torch.stack([categorical.log_prob(a) for a, categorical in zip(factory_action, factory_multi_categoricals)])
 
+        # compute entropies from valid logits for both robots and factories
         robot_entropy = torch.stack([categorical.entropy() for categorical in robot_multi_categoricals])
         factory_entropy = torch.stack([categorical.entropy() for categorical in factory_multi_categoricals])
 
+        # reshape everything back to 48x48 (map size)
         robot_num_predicted_parameters = len(robots_nvec) - 1
         factory_num_predicted_parameters = len(factories_nvec) - 1
         
+        #### ROBOTS ####
         robot_logprob = robot_logprob.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_entropy = robot_entropy.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_action = robot_action.T.view(-1, 48 * 48, robot_num_predicted_parameters)
         robot_invalid_action_masks = robot_invalid_action_masks.view(-1, 48 * 48, robots_nvec_sum + 1)
 
+        #### FACTORIES ####
         factory_logprob = factory_logprob.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_entropy = factory_entropy.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_action = factory_action.T.view(-1, 48 * 48, factory_num_predicted_parameters)
         factory_invalid_action_masks = factory_invalid_action_masks.view(-1, 48 * 48, factories_nvec_sum + 1)
 
+        # the joint logprob is the summ of all robots and factories logprobs
+        # this assumes every unit, of every nature, is independent
+        # note that sum in log() space is multiplication in probability space
         robot_logprob = robot_logprob.sum(1).sum(1)
         factory_logprob = factory_logprob.sum(1).sum(1)
         logprob = factory_logprob + robot_logprob
 
+        # the joint entropy is the summ of all robots and factories logprobs
         robot_entropy = robot_entropy.sum(1).sum(1)
         factory_entropy = factory_entropy.sum(1).sum(1)
         entropy = factory_entropy + robot_entropy
 
         return robot_action, factory_action, logprob, entropy, robot_invalid_action_masks, factory_invalid_action_masks
 
+    # forward pass for the critic only
     def get_value(self, x):
-        return self.critic(self.forward(x))
-
+        return self.critic(self(x))
 
 if __name__ == "__main__":
-    # torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
-    # taken from https://pytorch.org/docs/stable/elastic/run.html
+    # get ranks for multigpu training
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
+    
+    # read args
     args = parse_args()
     args.world_size = world_size
+    # distribute envs accross workers
     args.num_envs = int(args.num_envs / world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
 
-    # set the port number
-    #os.environ['MASTER_PORT'] = '29411'
-
+    # start the multigpu training
     if world_size > 1:
         dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
     else:
@@ -458,9 +496,10 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    #rdx_idx = np.random.randint(100000)
-    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_final_small" #+ str(rdx_idx)
+    # set the path for saving and loading checkpoints (needed for selfplay also)
+    PATH_AGENT_CHECKPOINTS = args.save_path
 
+    # only 1 process starts Wandb logging
     if local_rank == 0:
         if args.track:
             import wandb
@@ -474,6 +513,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 monitor_gym=True,
                 save_code=True,
             )
+
         writer = SummaryWriter(f"runs/{run_name}")
         writer.add_text(
             "hyperparameters",
@@ -483,18 +523,15 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         if not os.path.exists(PATH_AGENT_CHECKPOINTS):
             os.makedirs(PATH_AGENT_CHECKPOINTS)
 
-    # TRY NOT TO MODIFY: seeding
     # CRUCIAL: note that we needed to pass a different seed for each data parallelism worker
     args.seed += local_rank
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed - local_rank)
     torch.backends.cudnn.deterministic = args.torch_deterministic
-    #torch.backends.cudnn.deterministic = True
-    #torch.backends.cudnn.benchmark = False
-    #torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.allow_tf32 = False
 
+    # assign GPUs to processes
     if len(args.device_ids) > 0:
         assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
         device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -510,108 +547,66 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
     print("Thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
 
+    # start vec env
     envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
-
+    # start agent
     agent = Agent(envs).to(device)
 
+    # start self-play
     if local_rank == 0:
-        if args.track:
-            import wandb
-
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                sync_tensorboard=True,
-                config=vars(args),
-                name=run_name,
-                monitor_gym=True,
-                save_code=True,
-            )
-        writer = SummaryWriter(f"runs/{run_name}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
-
-        if not os.path.exists(PATH_AGENT_CHECKPOINTS):
-            os.makedirs(PATH_AGENT_CHECKPOINTS)
-
-    # TRY NOT TO MODIFY: seeding
-    # CRUCIAL: note that we needed to pass a different seed for each data parallelism worker
-    args.seed += local_rank
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed - local_rank)
-    torch.backends.cudnn.deterministic = args.torch_deterministic
-    #torch.backends.cudnn.deterministic = True
-    #torch.backends.cudnn.benchmark = False
-    #torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.allow_tf32 = False
-
-    if len(args.device_ids) > 0:
-        device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
-    else:
-        device_count = torch.cuda.device_count()
-        if device_count < world_size:
-            device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-        else:
-            device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() and args.cuda else "cpu")
-
-    # env setup
-    init_jvm()
-
-    print("local thread", local_rank, "has device", device, "Java is started:", jpype.isJVMStarted())
-
-    envs = gym.vector.SyncVectorEnv([make_env(i + args.seed, args.self_play, args.sparse_reward, args.simple_obs, device) for i in range(args.num_envs)])
-
-    agent = Agent(envs).to(device)
-
-    if local_rank == 0:
-
-        # start self-play
         num_models_saved = 0
         agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
         num_models_saved += 1
 
     torch.manual_seed(args.seed)
+    # start opt
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # all threads will wait for jvm to be initialized and initial checkpoint to exist
     if world_size > 1:
         dist.barrier()
-
+    
+    # give all the parallel envs a reference for an opponent 
     for i in range(len(envs.envs)):
         enemy_agent = Agent().to(device)
         enemy_agent.freeze_params()
         envs.envs[i].set_enemy_agent(enemy_agent)
 
-
-    # ALGO Logic: Storage for epoch data
+    # ALGO Logic: Storage
     mapsize = 48 * 48
 
+    # num of components of the MultiDiscrete space - 1 (- 1 because the 1st component is just the unit position)
     robot_action_space_shape = (mapsize, envs.single_action_space["robots"].shape[0] - 1)
+    # +1 because the first component will be the unit position to mask wherever there are no units
     robot_invalid_action_shape = (mapsize, envs.single_action_space["robots"].nvec[1:].sum() + 1)
 
+    # num of components of the MultiDiscrete space - 1 (- 1 because the 1st component is just the unit position)
     factory_action_space_shape = (mapsize, envs.single_action_space["factories"].shape[0] - 1)
+    # +1 because the first component will be the unit position to mask wherever there are no units
     factory_invalid_action_shape = (mapsize, envs.single_action_space["factories"].nvec[1:].sum() + 1)
 
+
+    # initialize the buffer at GPU already (preallocate)
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     robot_actions = torch.zeros((args.num_steps, args.num_envs) + robot_action_space_shape).to(device)
+    # separately store robot and factory actions
     factory_actions = torch.zeros((args.num_steps, args.num_envs) + factory_action_space_shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    # need to store invalid action masks to keep things on-policy
     robot_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + robot_invalid_action_shape).to(device)
     factory_invalid_action_masks = torch.zeros((args.num_steps, args.num_envs) + factory_invalid_action_shape).to(device)
 
-    # TRY NOT TO MODIFY: start the game
+    # start the game
     global_step = 0
     start_time = time.time()
     next_obs = torch.Tensor(envs.reset()).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // (args.batch_size * world_size)
-
+    
+    # print a summary of the model
     if local_rank == 0:
         print("Model's state_dict:")
         for param_tensor in agent.state_dict():
@@ -619,26 +614,30 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         total_params = sum([param.nelement() for param in agent.parameters()])
         print("Model's total parameters:", total_params)
 
+    #### TRAINING LOOP ####
     for update in range(1, num_updates + 1):
-        # Annealing the rate if instructed to do so.
+        # annealing the rate if instructed to do so
         if args.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # collect T steps (each parallel env steps at the same time)
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
+            # change reward curricula after lots of steps
             if global_step > 2000000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1
                     args.gae_lambda = 1
 
+            # store
             obs[step] = next_obs
             dones[step] = next_done
 
-            # ALGO LOGIC: action logic
+            # action logic: collect data with no learning involved
             with torch.no_grad():
                 values[step] = agent.get_value(obs[step]).flatten()
                 robot_action, factory_action, logproba, _, robot_invalid_action_masks[step], factory_invalid_action_masks[step] = agent.get_action(obs[step], envs_=envs)
@@ -647,6 +646,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             factory_actions[step] = factory_action
             logprobs[step] = logproba
 
+            #### ROBOTS ####
+            # clean the actions to only keep the actions that will be executed (where there are actions)
             robot_real_action = torch.cat([
             torch.stack(
                     [torch.arange(0, mapsize, device=device) for i in range(envs.num_envs)
@@ -666,6 +667,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 robot_java_valid_actions += [JArray(JArray(JInt))(robot_java_valid_action)]
             robot_java_valid_actions = JArray(JArray(JArray(JInt)))(robot_java_valid_actions)
 
+            #### FACTORIES ####
+            # clean the actions to only keep the actions that will be executed (where there are actions)
             factory_real_action = torch.cat([
                 torch.stack(
                     [torch.arange(0, mapsize, device=device) for i in range(envs.num_envs)
@@ -687,6 +690,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             robot_valid_actions = np.array(robot_java_valid_actions, dtype=object)
             factory_valid_actions = np.array([np.array(xi) for xi in factory_java_valid_actions], dtype=object)
 
+            # format the clean actions into the necessary format for our Lux environment wrapper
             actions = []
             for i in range(args.num_envs):
                 actions.append({
@@ -694,8 +698,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     "robots" : robot_valid_actions[i]
                 })
 
-            # TRY NOT TO MODIFY: execute the game and log data.
+            # execute the game and log data.
             try:
+                # step the environment
                 next_obs, rs, ds, infos = envs.step(actions)
                 next_obs = torch.Tensor(next_obs).to(device)
             except Exception as e:
@@ -704,6 +709,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
             rewards[step], next_done = torch.Tensor(rs).to(device), torch.Tensor(ds).to(device)
 
+            # if episode has finished, log episode metrics
+            # the envs are resetted automatically in the VecEnv wrapper
             for info in infos:
                 if "episode" in info.keys() and local_rank == 0:
                     print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
@@ -711,7 +718,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     writer.add_scalar("charts/episode_length", info['episode']['l'], global_step)
                     break
 
-        # bootstrap reward if not done. reached the batch limit
+        # at this point we have already collected T steps        
+        
+        # bootstrap value if not done (using GAE or TD)
         with torch.no_grad():
             last_value = agent.get_value(next_obs.to(device)).reshape(1, -1)
             if args.gae:
@@ -739,6 +748,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     returns[t] = rewards[t] + args.gamma * nextnonterminal * next_return
                 advantages = returns - values
 
+        # at this point we will start the PPO learning routine
+        
         # flatten the batch
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
@@ -750,15 +761,21 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         b_robot_invalid_action_masks = robot_invalid_action_masks.reshape((-1,) + robot_invalid_action_shape)
         b_factory_invalid_action_masks = factory_invalid_action_masks.reshape((-1,) + factory_invalid_action_shape)
 
-        # Optimizing the policy and value network
+        # optimizing the policy and value network
         inds = np.arange(args.batch_size, )
         clipfracs = []
+
+        # PPO iterates over many epochs
         for epoch in range(args.update_epochs):
             np.random.shuffle(inds)
+
+            # at each epoch we sample many minibatches
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = inds[start:end]
 
+                # compute the new logprobs with possibly new model weights (as the agent is updated at each minibatch)
+                # and the same masks, observations, and actions from the buffer
                 _, _, newlogproba, entropy, _, _ = agent.get_action(
                     b_obs[mb_inds],
                     b_robot_actions.long()[mb_inds],
@@ -768,21 +785,24 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     envs
                 )
 
+                # CRUCIAL: this should be 1 before the first batch update in the first epoch
                 ratio = (newlogproba - b_logprobs[mb_inds]).exp()
 
+                # log approx kl between updates. you dont want this to be high
                 with torch.no_grad():
                     approx_kl = (b_logprobs[mb_inds] - newlogproba).mean()
 
+                # get the advantages computed from the critic
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-                # Policy loss
+                # policy loss
                 pg_loss1 = -mb_advantages * ratio
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss
+                # value loss
                 new_values = agent.get_value(b_obs[mb_inds]).view(-1)
                 if args.clip_vloss:
                     v_loss_unclipped = ((new_values - b_returns[mb_inds]) ** 2)
@@ -794,15 +814,18 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 else:
                     v_loss = 0.5 * ((new_values - b_returns[mb_inds]) ** 2)
 
+                # entropy loss
                 entropy_loss = entropy.mean()
 
+                # PPO loss
                 loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
+                # learning
                 optimizer.zero_grad()
                 loss.backward()
 
+                # batch reduce the learning of all workers into the central policy
                 if world_size > 1:
-                    # batch allreduce ops: see https://github.com/entity-neural-network/incubator/pull/220
                     all_grads_list = []
                     for param in agent.parameters():
                         if param.grad is not None:
@@ -817,16 +840,22 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                             )
                             offset += param.numel()
 
+                # gradient clipping
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                
+                # optimize
                 optimizer.step()
 
+        # only one process runs an evaluation routine and saves checkpoints
+        # the pool of chekpoints is share among all workers though
         if local_rank == 0:
             if update % args.save_every == 0:
                 agent.save_checkpoint(num_models_saved, args.pool_size, PATH_AGENT_CHECKPOINTS)
                 num_models_saved += 1
 
-            # Evaluation!
+            # run evaluation and log video
             if update % args.eval_interval == 0:
+                # freeze params for eval
                 agent.freeze_params()
                 envs_test = make_eval_env(np.random.randint(1000) + update, args.self_play, args.sparse_reward, args.simple_obs, device, PATH_AGENT_CHECKPOINTS)
                 envs_test.set_enemy_agent(agent)
@@ -892,14 +921,18 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     print("Evaluated the agent and got reward: " + str(total_eval_reward))
                     mean_reward.append(total_eval_reward)
 
+                # log eval reward
                 wandb.log({
                     "eval/reward" : np.mean(mean_reward)
                 })
 
+                # log eval video
                 envs_test.send_wandb_video()
                 envs_test.close()
+                # keep training
                 agent.unfreeze_params()    
 
+        # wait for eval to finish
         if world_size > 1:
             dist.barrier()
 
@@ -907,7 +940,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # record rewards for plotting purposes
         if local_rank == 0:
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -918,6 +951,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             print("SPS:", int(global_step / (time.time() - start_time)))
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+    # training is done
     envs.close()
     if local_rank == 0:
         writer.close()
