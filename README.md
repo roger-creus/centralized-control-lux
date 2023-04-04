@@ -75,6 +75,7 @@ We propose a pixel-to-pixel architecture that we train with Proximal Policy Opti
 
 If you use this code, please cite it as below
 
+```
 @misc{creus2023centralized,
 author = {Creus Castanyer, Roger},
 month = {4},
@@ -82,6 +83,7 @@ title = {Centralized Control for Multi-Agent RL in a complex Real-Time-Strategy 
 url = {https://github.com/roger-creus/lux-ai-rl},
 year = {2023}
 }
+```
 
 
 
