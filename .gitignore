@@ -11,6 +11,8 @@ src/runs/*
 src/wandb/*
 wandb/*
 
+src/train_*
+
 src/checkpoints/*
 /checkpoints/*
 
