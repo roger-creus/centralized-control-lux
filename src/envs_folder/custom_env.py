@@ -8,17 +8,15 @@ import copy
 
 from luxai_s2.state import ObservationStateDict, StatsStateDict
 from IPython import embed
-
 from jpype.types import JArray, JInt
 from gym import spaces
 from luxai_s2.env import LuxAI_S2
-
 from .env_utils import *
 
 """
-This custom env handles self-play and training of the bidder and placer.
-1) Handles enemy sampling from a pool of checkpoints and its actions at each turn (so that from outside, env.step() only requires the agent action, needed for VectorizedEnvironments)
-2) Every reset() call makes it to the normal game phase directly (queries the bidder and placer before resetting and trains them with a DQN-like algo and replay buffer)
+This is a custom wrapper for the Lux Env with custom Obs and Action spaces and self-play embedded
+1) Handles self-play (from outside this script, env.step() only requires the agent action, needed for VectorizedEnvironments)
+2) Every reset() call makes it to the normal game phase directly
 """
 
 class CustomLuxEnv(gym.Env):
@@ -32,29 +30,34 @@ class CustomLuxEnv(gym.Env):
             PATH_AGENT_CHECKPOINTS = "checkpoints"
         ):
 
-
         # the true env
-        #self.env_ = LuxAI_S2(env_cfg, verbose=0, collect_stats=True)
         env_id = "LuxAI_S2-v0"
         self.env_ = gym.make(env_id, verbose=-1, collect_stats=True)
 
+        # whether to use self-play or sparse-reward or simple-obs
         self.self_play = self_play
         self.is_sparse_reward = sparse_reward
-        
         self.simple_obs = simple_obs
 
+        # used for the dense reward
         self.prev_step_metrics = None
+
+        # initialized at set_enemy_agent()
         self.enemy_agent = None
 
-        #self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.device = device
         self.PATH_AGENT_CHECKPOINTS = PATH_AGENT_CHECKPOINTS
         
-        # observation space
+        ##### OBS SPACE ####
+
+        # observation space can be simple (only 1s and 0s) or detailed. Default=detailed
         if self.simple_obs:
             self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 19), dtype=np.float64)
         else:
             self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 17), dtype=np.float64)
+
+
+        ##### ACTION SPACE ####
 
         # ROBOTS
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
@@ -64,11 +67,6 @@ class CustomLuxEnv(gym.Env):
         # dim 4: transfer amount [25%, 50%, 75%, 95%] -- LENGTH 4
         # dim 5: transfer material [ice, ore, power] --LENGTH 3
         
-        # TODO
-        # dim 9: recycle [0,1] -- LENGTH 2
-        # dim 10: N [1,3,6] (action repeat parameter) -- LENGTH 3
-        # TODO: when recycled, we also need to set the repeat value (right now we are recycling with repeat=1 which is a bit useless)
-
         # FACTORIES
         # dim 0: position in map -- LENGTH 48 * 48 (e.g. pos (3,2) is (3 + 2*48) )
         # dim 1: factory action [NOOP, build light robot, build heavy robot, grow lichen] -- LENGTH 4
@@ -81,7 +79,7 @@ class CustomLuxEnv(gym.Env):
             ),
         })
 
-        # reward definition
+        # for the reward definition
         self.num_factories = 0
         self.num_units = 0
 
@@ -91,9 +89,10 @@ class CustomLuxEnv(gym.Env):
         # keep the current game observation
         self.current_state = None
 
-    # TODO: figure out raw model output action shape
+    # gets a learning agent action (model format not Lux format)
     def step(self, action):
-        # turn the raw player model outputs to game actions
+
+        # turn the raw model outputs to game actions
         player_action = self.act_(action, "player_0")  # returs {"player_0" : actions}
 
         if self.self_play:
@@ -102,21 +101,24 @@ class CustomLuxEnv(gym.Env):
             # turn the raw enemy model outputs to game actions
             enemy_action = self.act_(enemy_action, "player_1") # returs {"player_1" : actions}
 
+        # if not self play we have a very bad enemy heurisitc
         if self.self_play is False:
             enemy_action = self.enemy_heuristic_step()
 
-        actions = {**player_action, **enemy_action} # final dict of actions from both players to send to the game
+        # final dict of actions from both players to send to the game
+        actions = {**player_action, **enemy_action} 
 
         # step actions to true env
         observations, reward, done, info = self.env_.step(actions)
 
+        # player_0 has died
         if reward["player_0"] == -1000:
             # if players have drawn
             if reward["player_1"] == -1000:
                 info["player_0"]["result"] = 0
                 reward_now = 0
             
-            # else, player 1 has lost
+            # else, player_1 has lost
             else:
                 if self.is_sparse_reward:
                     reward_now = -1
@@ -125,11 +127,13 @@ class CustomLuxEnv(gym.Env):
                     
                 info["player_0"]["result"] = -1
         
+        # player_1 has died
         elif reward["player_1"] == -1000:
             # if players have drawn
             if reward["player_0"] == -1000:
                 reward_now = 0
                 info["player_0"]["result"] = 0
+            
             # else, player 1 has won
             else:
                 if self.is_sparse_reward:
@@ -137,12 +141,15 @@ class CustomLuxEnv(gym.Env):
                 else:
                     reward_now = 0
                 info["player_0"]["result"] = 1
+        
+        # no players have died
         else:
             if self.is_sparse_reward:
                 reward_now = 0
             else:
+
+                #### DENSE REWARD ####
                 stats: StatsStateDict = self.env_.state.stats["player_0"]
-                #info = dict()
                 metrics = dict()
 
                 # new ICE in robots and new WATER in factories (+)
@@ -212,90 +219,8 @@ class CustomLuxEnv(gym.Env):
                     reward_now -= destroyed_factories * 3
 
                 self.prev_step_metrics = copy.deepcopy(metrics)
-                """
-                # lichen change
-                lichen_reward = (reward["player_0"] - self.prev_lichen) / 1000
-                reward_now += lichen_reward
-                self.prev_lichen = reward["player_0"]
-
-                # lost factories
-                if num_factories - self.num_factories < 0:
-                    factories_lost = num_factories - self.num_factories
-                    reward_now -= factories_lost
-                self.num_factories = num_factories
-
-                # lost units
-                num_units = len(observations["player_0"]["units"]["player_0"].keys())
-                units_change = (num_units - self.num_units) / 100
-                reward_now += units_change
-                self.num_units = num_units
-
-                # ice in factories
-                factories_ice = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ice"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_water = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["water"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                 
-                # ice in robots
-                if num_units != 0:
-                    unit_ice = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ice"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                    unit_water = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["water"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                else:
-                    unit_ice = 0
-
-                # metal in factories
-                factories_ore = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["ore"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-                factories_metal = sum([observations["player_0"]["factories"]["player_0"][f"{factory}"]["cargo"]["metal"] for factory in observations["player_0"]["factories"]["player_0"].keys()])
-
-                # ore in robots
-                if num_units != 0:
-                    unit_ore = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["ore"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                    unit_metal = sum([observations["player_0"]["units"]["player_0"][f"{unit}"]["cargo"]["metal"] for unit in observations["player_0"]["units"]["player_0"].keys()])
-                else:
-                    unit_ore = 0
-
-                factories_ore_change = factories_ore - self.factories_ore
-                factories_ice_change = factories_ice - self.factories_ice
-                factories_water_change = factories_water - self.factories_water
-                factories_metal_change = factories_metal - self.factories_metal
-
-                units_ice_change = unit_ice - self.unit_ice
-                units_ore_change = unit_ore - self.unit_ore
-                units_water_change = unit_water - self.unit_water
-                units_metal_change = unit_metal - self.unit_metal
-
-                self.factories_ore = factories_ore
-                self.factories_ice = factories_ice
-                self.factories_water = factories_water
-                self.factories_metal = factories_metal
-
-                # if factories have new ice its good!
-                if factories_ice_change > 0:
-                    reward_now += factories_ice_change
-                else:
-                    # if factories have less ice, its still good if they refined it
-                    # but its not good if someone picked it up
-                    if factories_water_change < 0:
-                        reward_now += factories_ice_change
-
-                # if factories have new ore its good!
-                if factories_ore_change > 0:
-                    reward_now += factories_ore_change
-                else:
-                    # if factories have less ice, its still good if they refined it
-                    # but its not good if someone picked it up
-                    if factories_metal_change < 0:
-                        reward_now += factories_ice_change
-
-                reward_now += factories_ore_change / 2
-
-                reward_now += units_ice_change / 4
-                reward_now += units_ore_change / 8
-                """
 
         done =  done["player_0"]
-
-        # important: using sparse reward
-        # important: that both agents get -1000 at the same time happens more often than expected when they are random. 
-        # how to deal with this?
 
         # keep the current game state updated
         self.current_state = observations
@@ -307,8 +232,7 @@ class CustomLuxEnv(gym.Env):
         # important: only return from the point of view of player! enemy is handled as part of the environment
         return self.current_player_obs, reward_now, done, info["player_0"]
 
-
-
+    # heurisitc for placing factories
     def placement_heuristic_pro(self, observation, agent):
         ice = observation[agent]["board"]["ice"]
         ore = observation[agent]["board"]["ore"]
@@ -344,26 +268,7 @@ class CustomLuxEnv(gym.Env):
         
         return np.unravel_index(best_loc, (48, 48))
 
-
-    def placement_heuristic(self, observations, agent):
-        area = 47
-        # Used to store the values computed by the heuristic of the cells 
-        values_array = np.zeros((48,48))
-        resources_array = observations[agent]["board"]["ice"] #+ observations[agent]["board"]["ore"]
-        # 2d locations of the resources
-        resources_location = np.array(list(zip(*np.where(resources_array == 1))))
-        for i in resources_location:
-            for j in range(area):
-                values_array[max(0, i[0]-(area-j)):min(47, i[0]+(area-j)), max(0, i[1]-(area-j)):min(47, i[1]+(area-j))] += (1/(area-j))
-        valid_spawns = observations[agent]["board"]["valid_spawns_mask"]
-        valid_grid = values_array * valid_spawns
-        # Flattened index of the valid cell with the highest value
-        spawn_loc = np.argmax(valid_grid)
-        # 2d index
-        spawn_index = np.unravel_index(spawn_loc, (48,48))
-        
-        return spawn_index
-
+    # heuristic for bidding
     def bidding_heuristic(self, resources_amount):
         # List of possible means for the Gaussian distribution
         means_list = [-resources_amount*0.50, -resources_amount*0.25, -resources_amount*0.125, 0, resources_amount*0.1250, resources_amount*0.25, resources_amount*0.5]
@@ -382,8 +287,10 @@ class CustomLuxEnv(gym.Env):
         
         return bids
 
+    # reset the env when done
     def reset(self, load_new_enemy=True):
-        # we now sample a new opponent at each game
+        
+        # we sample a new opponent at each game
         if self.self_play and load_new_enemy==True:
             self.update_enemy_agent()
         
@@ -392,10 +299,7 @@ class CustomLuxEnv(gym.Env):
         self.num_units = 0
         self.prev_step_metrics = None
 
-        # TODO: update the current observations for both players and preprocess them into BIDDER input format
-        # TODO: get action from bidder model (preprocess into placer format)
-
-        #Total resources that are available to bid
+        # total resources that are available to bid
         resources_amount = observations["player_0"]["board"]["factories_per_team"]*150
         
         # TODO: use a heurisitc
@@ -410,6 +314,7 @@ class CustomLuxEnv(gym.Env):
         factory_amount = {"player_0" : 0, "player_1" : 0}
         for player in factory_amount.keys():
             factory_amount[player] = observations["player_0"]["teams"][player]["water"]/observations["player_0"]["teams"][player]["factories_to_place"]
+        
         # handle all the factory placement phase
         while self.env_.state.real_env_steps < 0:
             action = dict()
@@ -441,21 +346,26 @@ class CustomLuxEnv(gym.Env):
         # important: return only from players perspective! Enemy is handled as part of the environment
         return self.current_player_obs
 
+    # rendering
     def render(self, mode):
         return self.env_.render(mode)
 
+    # transform the raw output actions into game actions that can be passed to the real env.
     def act_(self, action, player):
-        """
-        Transform the raw output actions into game actions that can be passed to the real env.
-        """
+        # IMPORTANT: see \luxai_s2\spaces\act_space.py
+        # IMPORTANT: see \luxai_s2\spaces\act_space.py
+        # IMPORTANT: see \luxai_s2\spaces\act_space.py
+        
         factory_actions = action["factories"]
         robot_actions = action["robots"]
 
         # we will fill this with the game actions
         commited_actions = {player : {}}
 
+        # get the current true state of game
         game_state = self.env_.state
 
+        #### FACTORIES ####
         for action in factory_actions:
             x = action[0] // 48
             y = action[0] % 48
@@ -478,6 +388,7 @@ class CustomLuxEnv(gym.Env):
                 if action[1] != 0:
                     print("Factory action not implemented")
 
+        #### ROBOTS ####
         for action in robot_actions:
             x = action[0] // 48
             y = action[0] % 48
@@ -485,9 +396,8 @@ class CustomLuxEnv(gym.Env):
 
             robot = game_state.board.get_units_at(pos)[0]
 
+            # this will be the action in the format Lux env wants it
             crafted_action = np.zeros(6)
-
-            # IMPORTANT: see \luxai_s2\spaces\act_space.py
 
             # action[1] == 0 means NOOP
             if action[1] == 0:
@@ -557,66 +467,7 @@ class CustomLuxEnv(gym.Env):
                 crafted_action[2] = 4
                 # fix pickup amount to 25% of available cargo
                 free_power_capacity = robot.battery_capacity - robot.power
-                
-                #current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                #free_resource_capacity = robot.cargo_space - current_cargo
-                #resource_amount = free_resource_capacity * 0.25
-
-                # if action[6] == 4:
-                #     amount = power_amount
-                # else:
-                #     resource = RESOURCE_MAPPING[action[6]]
-                #     amount = resource_amount
-
                 crafted_action[3] = free_power_capacity
-
-                """
-                # pickup amount = 0.25
-                if action[6] == 0:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.25
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.25
-                
-                # pickup amount = 0.5
-                elif action[6] == 1:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.5
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.5
-
-                elif action[6] == 2:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.75
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.75
-                
-                elif action[6] == 3:
-                    if action[7] == 4:
-                        free_power_capacity = robot.battery_capacity - robot.power
-                        amount = free_power_capacity * 0.95
-                    else:
-                        current_cargo = robot.cargo.ice + robot.cargo.water +robot.cargo.metal + robot.cargo.ore 
-                        free_resource_capacity = robot.cargo_space - current_cargo
-                        resource = RESOURCE_MAPPING[action[7]]
-                        amount = free_resource_capacity * 0.95
-                else:
-                    print("Invalid pickup amount action")
-
-                crafted_action[3] = amount
-                """
 
             elif action[1] == 4:
                 # action_type = DIG
@@ -640,6 +491,7 @@ class CustomLuxEnv(gym.Env):
 
         return commited_actions
 
+    # turn the raw json observations to actual model observations
     def obs_(self, obs, player):
         obs = obs[player]
 
@@ -762,7 +614,7 @@ class CustomLuxEnv(gym.Env):
         # transpose for channel last
         return obs.transpose(1,2,0)
 
-
+    # turn the raw json observations to actual model observations (uses only 1s and 0s)
     def simple_obs_(self, obs, player):
         obs = obs[player]
 
@@ -890,6 +742,9 @@ class CustomLuxEnv(gym.Env):
         # transpose for channel last
         return obs.transpose(1,2,0)
 
+    # simulates an opponent decision by querying the opponent model
+    # the opponent is not learning
+    # follows the same logic as the learning agent in ppo_res_gridnet_multigpu.py
     def enemy_step(self):
         with torch.no_grad():
             obs = torch.Tensor(self.current_enemy_obs).unsqueeze(0).to(self.device)
@@ -941,6 +796,7 @@ class CustomLuxEnv(gym.Env):
 
         return actions
 
+    # simulates the opponent actions using a bad heurisitc (if doesnt want to use self play)
     def enemy_heuristic_step(self):
         actions = dict()
 
@@ -997,41 +853,22 @@ class CustomLuxEnv(gym.Env):
         
         return {"player_1" : actions}
 
+    # called only once at the begining of training
     def set_enemy_agent(self, agent):
         self.enemy_agent = agent
     
+    # needed for self-play with TrueSkill only
     def set_enemy_idx(self, idx):
         self.enemy_idx = idx
     
+    # change reward to sparse
     def set_sparse_reward(self):
         self.is_sparse_reward = True
 
+    # called at each env.reset(). loads a new enemy from the pool
     def update_enemy_agent(self):
         try:
             self.enemy_idx = self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
             self.enemy_agent.freeze_params()
         except:
             print(self.PATH_AGENT_CHECKPOINTS)
-
-
-def make_env(seed):
-    def thunk():
-        env = CustomLuxEnv()
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.seed(seed)
-        env.action_space.seed(seed)
-        env.observation_space.seed(seed)
-        return env
-
-    return thunk
-
-if __name__ == "__main__":
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(3 + i) for i in range(8)]
-    )
-
-    obs = envs.reset()
-
-    action = dict()
-    action["factories"] = [10, 2]
-    action["robots"] = [15, 2, 1, 1, 1, 1, 1, 1, 1, 0]

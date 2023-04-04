@@ -3,19 +3,15 @@ import numpy as np
 import torch
 import math
 import luxai_s2.unit as luxai_unit
-from luxai_s2.map.position import Position
 
-import gym
-import numpy as np
-import torch
-import math
-import luxai_s2.unit as luxai_unit
 from luxai_s2.map.position import Position
-
 from utils import VideoWrapper
-
 from IPython import embed
 
+# this is only used in the scripts that end with _post.py
+
+# this masks the TRANSFER parameters although they werent ilegal a priori if at postprocessing we see that the output action type was MOVE
+# and viceversa
 def post_masks(robot_masks, action_types):
     # we are going to correct the masks only where there are robots
     # where there are no robots all actions should already be set to ilegal
@@ -46,7 +42,6 @@ def post_categoricals(multi_categoricals, action_types, robot_masks):
     Mask the logits and probs of actions that were not ilegal but are not going to be executed
     Can be done only if logits and logprobs dont require grad() -> During ROLLOUTs
     Use the robot_masks only to identify where there actually are robots
-    Q: Why do I need to set logits and logprobs to 0? shouldnt be -1e+8 for the logits?
     """
     # if there are no robots, nothing to correct, all should be ilegal already
     max_ = torch.max(robot_masks[:,0]).item()
@@ -79,6 +74,7 @@ def post_categoricals(multi_categoricals, action_types, robot_masks):
 
     return multi_categoricals
 
+#### FACTORIES ####
 def get_factory_invalid_action_masks(envs, player):
     if type(envs) == gym.vector.sync_vector_env.SyncVectorEnv:
         action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["factories"].nvec[1:].sum() + 1))
@@ -119,12 +115,14 @@ def get_factory_invalid_action_masks(envs, player):
             if metal < 100 or current_power < 500:
                 action_mask[i, x, y, 3] = 0     
 
+            # cant water lichen if no water
             if water -1 <= water_cost(factory, env.env_):
                 action_mask[i, x, y, 4] = 0     
 
     return action_mask
 
 
+#### ROBOTS ####
 def get_robot_invalid_action_masks(envs, player):
     # the returned mask will be of shape (num_envs, map_size, map_size, total_unit_actions + 1)
     # the +1 in the end indicates if if there is a unit in tile x,y. takes values in [0,1]
@@ -337,340 +335,7 @@ def get_robot_invalid_action_masks(envs, player):
     return action_mask
 
 
-def get_robot_invalid_action_masks_action_type(envs, player):
-    """
-    Returns the mask for invalid action types [source unit pos, NOOP, MOVE, TRANSFER, PICKUP, DIG, SELF-DESTRUCT]
-    """
-    if player == "player_0":
-        action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["robots"].nvec[1] + 1))
-        envs = envs.envs
-
-    if player == "player_1":
-        action_mask = np.zeros((1, 48, 48, envs.action_space["robots"].nvec[1] + 1))
-        envs = [envs]
-
-    for i in range(len(envs)):
-        env = envs[i]
-        game_state = env.env_.state
-
-        for unit_id in game_state.units[player]:
-            unit = game_state.units[player][unit_id]
-            x, y = unit.pos.x, unit.pos.y
-
-            # start by assuming all actions are legal where there is a unit
-            action_mask[i, x, y, :] = 1
-
-            current_power = unit.power
-            update_queue_cost = action_queue_cost(unit, env.env_.env_cfg)
-
-            # only noop is valid
-            if current_power <= update_queue_cost:
-                action_mask[i, x, y, 2:] = 0
-
-            ###### MOVE ACTION TYPE ######
-            move_cost_up = move_cost(unit, game_state, 1)
-            can_move_up = True
-            if move_cost_up == 99999:
-                can_move_up = False
-
-            if current_power - update_queue_cost <= move_cost_up:
-                can_move_up = False
-
-            move_cost_right = move_cost(unit, game_state, 2)
-            can_move_right = True
-            if move_cost_right == 99999:
-                can_move_right = False
-
-            if current_power - update_queue_cost <= move_cost_right:
-                can_move_right = False
-
-            can_move_down = True
-            move_cost_down = move_cost(unit, game_state, 3)
-            if move_cost_down == 99999:
-                can_move_down = False
-            
-            if current_power - update_queue_cost <= move_cost_down:
-                can_move_down = False
-
-            can_move_left = True
-            move_cost_left = move_cost(unit, game_state, 4)
-            if move_cost_left == 99999:
-                can_move_left = False
-            
-            if current_power - update_queue_cost <= move_cost_left:
-                can_move_left = False
-
-            #print("Unit", unit_id, "has power:", current_power - update_queue_cost, "and the costs for moving are", move_cost_up, move_cost_right, move_cost_down, move_cost_left)
-
-            if not can_move_up and not can_move_down and not can_move_left and not can_move_right:
-                action_mask[i,x,y,2] = 0
-            #    print("Restricting movement for unit", unit_id)
-
-            ###### TRANSFER ACTION TYPE ######
-            factory_center = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y]
-            can_transfer_center = True
-            if factory_center == -1:
-                can_transfer_center = False
-
-            if unit.pos.y - 1 >= 0:
-                robot_up = game_state.board.get_units_at(Position(np.array([unit.pos.x, unit.pos.y - 1])))
-                factory_up = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y - 1]
-            else:
-                robot_up = None
-                factory_up = -1
-
-            can_transfer_up = True
-            if factory_up == -1 and robot_up is None:
-                can_transfer_up = False
-            
-            if unit.pos.x + 1 <= 47:
-                robot_right = game_state.board.get_units_at(Position(np.array([unit.pos.x + 1, unit.pos.y])))
-                factory_right = game_state.board.factory_occupancy_map[unit.pos.x + 1][unit.pos.y]
-            else:
-                robot_right = None
-                factory_right = -1
-
-            can_transfer_right = True
-            if factory_right == -1 and robot_right is None:
-                can_transfer_right = False
-
-            if unit.pos.y + 1 <= 47:
-                robot_down = game_state.board.get_units_at(Position(np.array([unit.pos.x, unit.pos.y + 1])))
-                factory_down = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y + 1]
-            else:
-                robot_down = None
-                factory_down = -1
-
-            can_transfer_down = True
-            if factory_down == -1 and robot_down is None:
-                can_transfer_down = False
-
-            if unit.pos.x -1 >= 0:
-                robot_left = game_state.board.get_units_at(Position(np.array([unit.pos.x - 1, unit.pos.y])))
-                factory_left = game_state.board.factory_occupancy_map[unit.pos.x - 1][unit.pos.y]
-            else:
-                robot_left = None
-                factory_left = -1
-
-            can_transfer_left = True
-            if factory_left == -1 and robot_left is None:
-                can_transfer_left = False
-
-            if not can_transfer_left and not can_transfer_up and not can_transfer_down and not can_transfer_right and not can_transfer_center:
-                action_mask[i,x,y,3] = 0
-
-            ore, metal, ice, water = unit.cargo.ore, unit.cargo.metal, unit.cargo.ice, unit.cargo.water
-            total_cargo = ore + metal + ice + water
-            
-            if total_cargo <= 15 and unit.unit_type == luxai_unit.UnitType.LIGHT:
-                action_mask[i,x,y,3] = 0
-
-            if total_cargo <= 150 and unit.unit_type == luxai_unit.UnitType.HEAVY:
-                action_mask[i,x,y,3] = 0
-                
-            ###### PICKUP AND DIG ACTION TYPE ######
-            # TODO: dont pick up a resource from a factory if there is no resource
-
-            if factory_center == -1:
-                action_mask[i,x,y,4] = 0
-            else:
-                action_mask[i,x,y,5] = 0
-
-            if total_cargo >= 140 and unit.unit_type == luxai_unit.UnitType.LIGHT:
-                action_mask[i,x,y,4] = 0
-            
-            if total_cargo >= 930 and unit.unit_type == luxai_unit.UnitType.HEAVY:
-                action_mask[i,x,y,4] = 0
-
-            if current_power <= 5 + update_queue_cost  and unit.unit_type == luxai_unit.UnitType.LIGHT:
-                action_mask[i,x,y,5] = 0
-
-            if current_power <= 60 + update_queue_cost and unit.unit_type == luxai_unit.UnitType.HEAVY:
-                action_mask[i,x,y,5] = 0
-            
-            ###### SELF DESTRUCT ACTION TYPE ######
-            if current_power <= 10 + update_queue_cost and unit.unit_type == luxai_unit.UnitType.LIGHT:
-                action_mask[i, x, y, 6] = 0
-            if current_power <= 100 + update_queue_cost and unit.unit_type == luxai_unit.UnitType.HEAVY:
-                action_mask[i, x, y, 6] = 0
-    
-            ###### SELF DESTRUCT ACTION TYPE ######
-            if (current_power - update_queue_cost) / unit.battery_capacity >= 0.75 * unit.battery_capacity:
-                action_mask[i, x, y, 7] = 0
-
-    return action_mask    
-
-
-def get_robot_invalid_action_masks_action_params(envs, player, action_types):
-    # the returned mask will be of shape (num_envs, map_size, map_size, total_unit_actions)
-    if player == "player_0":
-        action_mask = np.zeros((len(envs.envs), 48, 48, envs.single_action_space["robots"].nvec[2:].sum()))
-        envs = envs.envs
-
-    if player == "player_1":
-        action_mask = np.zeros((1, 48, 48, envs.action_space["robots"].nvec[2:].sum()))
-        envs = [envs]
-
-    for i in range(len(envs)):
-        env = envs[i]
-        game_state = env.env_.state
-
-        for unit_id in game_state.units[player]:
-            unit = game_state.units[player][unit_id]
-            x, y = unit.pos.x, unit.pos.y
-
-            current_power = unit.power
-            update_queue_cost = action_queue_cost(unit, env.env_.env_cfg)
-
-            # read the selected action type
-            action_type = action_types[i, x, y]
-            
-            ###### NOOP ######
-            if action_type == 0:
-                action_mask[i, x, y, :] = 0
-            else:
-                ###### MOVE ACTION PARAMS ######
-                if action_type == 1:
-                    action_mask[i, x, y, 0:4] = 1
-                    #print("--------------------------------")
-                    move_cost_up = move_cost(unit, game_state, 1)
-                    if move_cost_up == 99999:
-                        action_mask[i, x, y, 0] = 0
-                        #print("masked move up bc off-map")
-
-                    if current_power - update_queue_cost <= move_cost_up:
-                        action_mask[i, x, y, 0] = 0
-                        #print("masked move up bc no power", "current_power is", current_power - update_queue_cost, "and cost is", move_cost_up)
-
-
-                    move_cost_right = move_cost(unit, game_state, 2)
-                    if move_cost_right == 99999:
-                        action_mask[i, x, y, 1] = 0
-                        #print("masked move right bc off-map")
-
-                    if current_power - update_queue_cost <= move_cost_right:
-                        action_mask[i, x, y, 1] = 0
-                        #print("masked move right bc no power", "current_power is", current_power - update_queue_cost, "and cost is", move_cost_right)
-
-                    move_cost_down = move_cost(unit, game_state, 3)
-                    if move_cost_down == 99999:
-                        action_mask[i, x, y, 2] = 0
-                        #print("masked move down bc off-map")
-                    
-                    if current_power - update_queue_cost <= move_cost_down:
-                        action_mask[i, x, y, 2] = 0
-                        #print("masked move down bc no power", "current_power is", current_power - update_queue_cost, "and cost is", move_cost_down)
-
-                    move_cost_left = move_cost(unit, game_state, 4)
-                    if move_cost_left == 99999:
-                        action_mask[i, x, y, 3] = 0
-                        #print("masked move left bc off-map")
-
-                    if current_power - update_queue_cost <= move_cost_left:
-                        action_mask[i, x, y, 3] = 0
-                        #print("masked move left bc no power", "current_power is", current_power - update_queue_cost, "and cost is", move_cost_left)
-
-                    # all but movement params are ilegal
-                    action_mask[i, x, y, 4:] = 0
-
-                ###### TRANSFER ACTION PARAMS ######
-                elif action_type == 2:
-
-                    action_mask[i, x, y, 4:18] = 1
-
-                    factory_center = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y]
-                    
-                    if factory_center == -1:
-                        action_mask[i, x, y, 4] = 0
-
-                    if unit.pos.y - 1 >= 0:
-                        robot_up = game_state.board.get_units_at(Position(np.array([unit.pos.x, unit.pos.y - 1])))
-                        factory_up = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y - 1]
-                    else:
-                        factory_up = -1
-                        robot_up = None
-
-                    if factory_up == -1 and robot_up is None:
-                        action_mask[i, x, y, 5] = 0
-
-                    if unit.pos.x + 1 <= 47:
-                        robot_right = game_state.board.get_units_at(Position(np.array([unit.pos.x + 1, unit.pos.y])))
-                        factory_right = game_state.board.factory_occupancy_map[unit.pos.x + 1][unit.pos.y]
-                    else:
-                        factory_right = -1
-                        robot_right = None
-
-                    if factory_right == -1 and robot_right is None:
-                        action_mask[i, x, y, 6] = 0
-
-                    if unit.pos.y + 1 <= 47:
-                        robot_down = game_state.board.get_units_at(Position(np.array([unit.pos.x, unit.pos.y + 1])))
-                        factory_down = game_state.board.factory_occupancy_map[unit.pos.x][unit.pos.y + 1]
-                    else:
-                        factory_down = -1
-                        robot_down = None
-
-                    if factory_down == -1 and robot_down is None:
-                        action_mask[i, x, y, 7] = 0
-
-                    if unit.pos.x -1 >= 0:
-                        robot_left = game_state.board.get_units_at(Position(np.array([unit.pos.x - 1, unit.pos.y])))
-                        factory_left = game_state.board.factory_occupancy_map[unit.pos.x - 1][unit.pos.y]
-                    else:
-                        factory_left = -1
-                        robot_left = None
-
-                    if factory_left == -1 and robot_left is None:
-                        action_mask[i, x, y, 8] = 0
-                        
-                    power, ore, metal, ice, water = unit.power, unit.cargo.ore, unit.cargo.metal, unit.cargo.ice, unit.cargo.water
-                    total_cargo = ore + metal + ice + water
-
-                    if power < 15:
-                        action_mask[i, x, y, 13] = 0
-                    
-                    if ore < 5:
-                        action_mask[i, x, y, 14] = 0
-                        
-                    if metal < 5:
-                        action_mask[i, x, y, 15] = 0
-
-                    if ice < 5:
-                        action_mask[i, x, y, 16] = 0
-
-                    if water < 5:
-                        action_mask[i, x, y, 17] = 0
-
-                    action_mask[i, x, y, 0:4] = 0
-                    action_mask[i, x, y, 18:] = 0
-
-                elif action_type == 3:
-                    action_mask[i, x, y, 18:] = 1
-
-                    power, ore, metal, ice, water = unit.power, unit.cargo.ore, unit.cargo.metal, unit.cargo.ice, unit.cargo.water
-                    total_cargo = ore + metal + ice + water
-
-                    cargo_capacity = 100 if unit.unit_type == luxai_unit.UnitType.LIGHT else 1000
-
-                    # cannot pickup resources if full cargo
-                    if total_cargo >= (0.9 * cargo_capacity):
-                         action_mask[i, x, y, 19:] = 0    
-
-                    # cannot pickup power if full battery
-                    if current_power >= (0.9 * unit.battery_capacity):
-                        action_mask[i, x, y, 18] = 0
-
-                    action_mask[i, x, y, 0:18] = 0
-
-                elif action_type == 4:
-                    # digging was selected (so it wsnt ilegal), and there are no action params for digging so mask them all
-                    action_mask[i, x, y, :] = 0
-                elif action_type == 5:
-                    # self-destruct was selected (so it wsnt ilegal), and there are no action params for self-destruct so mask them all
-                    action_mask[i, x, y, :] = 0
-
-    return action_mask
-
+#### UTILS FOR THE ACTION MASKS ####
 def water_cost(factory, env):
     game_state = env.state
     owned_lichen_tiles = (game_state.board.lichen_strains == factory.state_dict()["strain_id"]).sum()

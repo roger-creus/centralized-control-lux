@@ -1,11 +1,18 @@
 import numpy as np
+import math
+
 from luxai_s2.utils.utils import my_turn_to_place_factory, is_day
 from luxai_s2.map.position import Position
 from scipy.ndimage import distance_transform_cdt
 from scipy.spatial import KDTree
-import math
 
 RESOURCE_MAPPING = {0:"ice", 1:"ore", 2:"water", 3:"metal"}
+
+"""
+All this utilities are used in the environment wrapper.
+Some for the obs_() method. Some for the reward. Some for the heurisitc enemy
+
+"""
 
 def water_cost(factory, env):
     game_state = env.state
