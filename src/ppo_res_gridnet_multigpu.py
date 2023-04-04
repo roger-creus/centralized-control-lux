@@ -458,8 +458,8 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     writer = None
 
-    rdx_idx = np.random.randint(100000)
-    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_" + str(rdx_idx)
+    #rdx_idx = np.random.randint(100000)
+    PATH_AGENT_CHECKPOINTS = "/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_final_small" #+ str(rdx_idx)
 
     if local_rank == 0:
         if args.track:
@@ -629,7 +629,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         for step in range(0, args.num_steps):
             global_step += 1 * args.num_envs * world_size
             
-            if global_step > 1000000000:
+            if global_step > 2000000000:
                 for i in range(len(envs.envs)):
                     envs.envs[i].set_sparse_reward()
                     args.gamma = 1

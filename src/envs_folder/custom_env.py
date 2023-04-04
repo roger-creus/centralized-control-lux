@@ -1008,7 +1008,7 @@ class CustomLuxEnv(gym.Env):
 
     def update_enemy_agent(self):
         try:
-            self.enemy_idx = self.enemy_agent.load_checkpoint_with_skill(self.PATH_AGENT_CHECKPOINTS)
+            self.enemy_idx = self.enemy_agent.load_checkpoint(self.PATH_AGENT_CHECKPOINTS)
             self.enemy_agent.freeze_params()
         except:
             print(self.PATH_AGENT_CHECKPOINTS)

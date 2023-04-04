@@ -1,33 +1,25 @@
 #!/bin/bash
-#SBATCH --partition=long
-#SBATCH --nodes=2
-#SBATCH --gres=gpu:rtx8000:1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=10G
-#SBATCH --time=2:00:00                                           
+#SBATCH --partition=lab-real
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:1                           
+#SBATCH --mem=50G                                       
+#SBATCH --time=168:00:00                                           
 #SBATCH -o /network/scratch/r/roger.creus-castanyer/slurm-%j.out 
 
 # 1. Load your environment
 module load anaconda/3
 
-### change 5-digit MASTER_PORT as you wish, slurm will raise Error if duplicated with others
-export MASTER_PORT=12340
+export OMP_NUM_THREADS=1
 
-### change WORLD_SIZE as gpus/node * num_nodes
-export WORLD_SIZE=2
-
-echo "NODELIST="${SLURM_NODELIST}
-master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_ADDR=$master_addr
-echo "MASTER_ADDR="$MASTER_ADDR
+#export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CONDA_PREFIX/lib/
 
 conda activate /home/mila/r/roger.creus-castanyer/anaconda3/envs/mario
 
 # 4. Launch your job, tell it to save the model in $SLURM_TMPDIR
 #    and look for the dataset into $SLURM_TMPDIR
 
-srun python3 ppo_final_gridnet_multigpu_postmasks.py --self-play True  --pool-size 5 --sparse-reward False --simple-obs False --track --num-envs 2 --num-steps 64 --eval-interval 50 --save-every 25
+torchrun --standalone --nnodes 1 --nproc_per_node 1 --master_port 29499 ppo_pixel_gridnet_multigpu.py --total-timesteps 1000000000 --clip-coef=0.14334778465053272 --ent-coef=0.002408486638907176 --gae-lambda=0.9322312137190516 --gamma=0.9945973988514306 --learning-rate=0.0016166261475302418 --max-grad-norm=0.28978755223510055 --minibatch-size=128 --num-envs=64 --num-steps=64 --pool-size=5 --save-every=75 --update-epochs=7 --vf-coef=0.2734614814048212 --device-ids 0
+#wandb agent rogercreus/lux/w4eyctva
 
 # 5. Copy whatever you want to save on $SCRATCH
 cp -r $SLURM_TMPDIR/* /network/scratch/r/roger.creus-castanyer/
