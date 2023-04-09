@@ -234,7 +234,9 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.deconv = nn.Sequential(
-            nn.Conv2d(args.num_channels * 8, output_channels, 1, stride=1),
+            nn.Conv2d(args.num_channels * 8, args.num_channels * 2, 1, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(args.num_channels * 2, output_channels, 1, stride=1),
             Transpose((0, 2, 3, 1)),
         )
         

@@ -22,5 +22,7 @@ src/checkpoints_gridnet/*
 src/checkpoints_unet/*
 /checkpoints_unet/*
 
+data/*
+
 *.pt
 /*.pt

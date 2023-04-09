@@ -93,7 +93,7 @@ def parse_args():
         help="the id of the environment")
 
     # environment + self-play specs
-    parser.add_argument('--save-path', type=str, default="/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_final_small",
+    parser.add_argument('--save-path', type=str, default="/home/mila/r/roger.creus-castanyer/lux-ai-rl/src/checkpoints_megasmall",
                             help="how many train updates between saving a new checkpoint and loading a new enemy")
     parser.add_argument('--self-play', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                             help="train by selfplay")

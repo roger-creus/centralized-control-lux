@@ -54,7 +54,7 @@ class CustomLuxEnv(gym.Env):
         if self.simple_obs:
             self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 19), dtype=np.float64)
         else:
-            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 17), dtype=np.float64)
+            self.observation_space = gym.spaces.Box(low=-1, high=1, shape=(48, 48, 22), dtype=np.float64)
 
 
         ##### ACTION SPACE ####
@@ -136,7 +136,7 @@ class CustomLuxEnv(gym.Env):
             
             # else, player 1 has won
             else:
-                if self.is_sparse_reward:
+                if self.is_sparse_reward is True:
                     reward_now = 1
                 else:
                     reward_now = 0
@@ -144,7 +144,7 @@ class CustomLuxEnv(gym.Env):
         
         # no players have died
         else:
-            if self.is_sparse_reward:
+            if self.is_sparse_reward is True:
                 reward_now = 0
             else:
 
@@ -187,12 +187,12 @@ class CustomLuxEnv(gym.Env):
                     # positive reward for mining ice and generating water
                     ice_dug_this_step = metrics["ice_dug"] - self.prev_step_metrics["ice_dug"]
                     water_produced_this_step = (metrics["water_produced"] - self.prev_step_metrics["water_produced"])
-                    reward_now += (ice_dug_this_step / 100) + water_produced_this_step
+                    reward_now += (ice_dug_this_step / 20) + (water_produced_this_step/10)
 
                     # positive reward for mining ore and generating metal
                     ore_dug_this_step = metrics["ore_dug"] - self.prev_step_metrics["ore_dug"]
                     metal_produced_this_step = (metrics["metal_produced"] - self.prev_step_metrics["metal_produced"])
-                    reward_now += ((ore_dug_this_step / 100) + metal_produced_this_step) / 1.5
+                    reward_now += ((ore_dug_this_step / 40) + metal_produced_this_step / 10)
 
                     # positive reward for creating new robots
                     new_lights = metrics["count_lights"] - self.prev_step_metrics["count_lights"]
@@ -207,12 +207,17 @@ class CustomLuxEnv(gym.Env):
                     reward_now -= (destroyed_heavies * 10) / 50
 
                     # BIG negative reward for consuming water
-                    consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
-                    reward_now -= consumed_water / 10
+                    #consumed_water = metrics["consumed_water"] - self.prev_step_metrics["consumed_water"]
+                    #reward_now -= consumed_water / 10
 
                     # SMALL positive reward for creating lichen
                     new_lichen = metrics["lichen"] - self.prev_step_metrics["lichen"]
-                    reward_now += new_lichen / 100
+                    
+                    # its worse to lose lichen than not to win it
+                    if new_lichen > 0:
+                        reward_now += new_lichen / 100
+                    else:
+                        reward_now -= new_lichen / 10
 
                     # negative reward for loosing a factory
                     destroyed_factories = metrics["destroyed_factories"] - self.prev_step_metrics["destroyed_factories"]
@@ -516,6 +521,8 @@ class CustomLuxEnv(gym.Env):
         unit_ice = np.zeros((48,48), dtype=float)
         unit_ore = np.zeros((48,48), dtype=float)
         unit_on_factories = np.zeros((48,48), dtype=float)
+        unit_has_ice = np.zeros((48,48), dtype=float)
+        unit_has_ore = np.zeros((48,48), dtype=float)
 
         my_units = obs["units"][player]
         enemy_units = obs["units"][opponent]
@@ -527,18 +534,20 @@ class CustomLuxEnv(gym.Env):
 
             unit_ice[x, y] = unit["cargo"]["ice"] 
             unit_ore[x, y] = unit["cargo"]["ore"] 
+            unit_has_ore[x, y] = 1 if unit["cargo"]["ore"] > 0 else 0
+            unit_has_ice[x, y] = 1 if unit["cargo"]["ice"] > 0 else 0
             unit_on_factories[x, y] = 1 if (factory_there != -1 and factory_there in self.env_.state.teams[player].factory_strains) else 0
             
             if unit["unit_type"] == 'LIGHT':
                 light_units[x, y] = 1
                 unit_power[x, y] /= 150
-                unit_ice[x, y] /= 10
-                unit_ore[x, y] /= 10
+                unit_ice[x, y] /= 100
+                unit_ore[x, y] /= 100
             else:
                 heavy_units[x, y] = 1
                 unit_power[x, y] /= 3000
-                unit_ice[x, y] /= 100
-                unit_ore[x, y] /= 100
+                unit_ice[x, y] /= 1000
+                unit_ore[x, y] /= 1000
 
         for unit_id in enemy_units:
             unit = enemy_units[unit_id]
@@ -547,18 +556,20 @@ class CustomLuxEnv(gym.Env):
 
             unit_ice[x, y] = - unit["cargo"]["ice"] 
             unit_ore[x, y] = - unit["cargo"]["ore"] 
+            unit_has_ore[x, y] = -1 if unit["cargo"]["ore"] > 0 else 0
+            unit_has_ice[x, y] = -1 if unit["cargo"]["ice"] > 0 else 0
             unit_on_factories[x, y] = -1 if (factory_there != -1 and factory_there in self.env_.state.teams[opponent].factory_strains) else 0
             
             if unit["unit_type"] == 'LIGHT':
                 light_units[x, y] = -1
                 unit_power[x, y] /= 150
-                unit_ice[x, y] /= 10
-                unit_ore[x, y] /= 10
+                unit_ice[x, y] /= 100
+                unit_ore[x, y] /= 100
             else:
                 heavy_units[x, y] = -1
                 unit_power[x, y] /= 3000
-                unit_ice[x, y] /= 100
-                unit_ore[x, y] /= 100
+                unit_ice[x, y] /= 1000
+                unit_ore[x, y] /= 1000
 
         # get factories data
         factories = np.zeros((48,48), dtype=float)
@@ -566,6 +577,9 @@ class CustomLuxEnv(gym.Env):
         factory_ore = np.zeros((48,48), dtype=float)
         factory_water = np.zeros((48,48), dtype=float)
         factory_metal = np.zeros((48,48), dtype=float)
+        factory_has_ice = np.zeros((48,48), dtype=float)
+        factory_has_ore = np.zeros((48,48), dtype=float)
+        factory_will_survive = np.zeros((48,48), dtype=float)
 
         my_factories = obs["factories"][player]
         enemy_factories = obs["factories"][opponent]
@@ -575,20 +589,29 @@ class CustomLuxEnv(gym.Env):
             x, y = factory["pos"][0], factory["pos"][1]
 
             factories[x-1:x+2, y-1:y+2] = 1
-            factory_ice[x-1:x+2, y-1:y+2] = factory["cargo"]["ice"] / 150
-            factory_water[x-1:x+2, y-1:y+2] = factory["cargo"]["water"] / 150
-            factory_metal[x-1:x+2, y-1:y+2] = factory["cargo"]["metal"] / 150
-            factory_ore[x-1:x+2, y-1:y+2] = factory["cargo"]["ore"] / 150
+            factory_ice[x-1:x+2, y-1:y+2] = factory["cargo"]["ice"] / 500
+            factory_water[x-1:x+2, y-1:y+2] = factory["cargo"]["water"] / 500
+            factory_metal[x-1:x+2, y-1:y+2] = factory["cargo"]["metal"] / 500
+            factory_ore[x-1:x+2, y-1:y+2] = factory["cargo"]["ore"] / 500
+            factory_has_ice[x-1:x+2, y-1:y+2] = 1 if factory["cargo"]["ice"] > 0 else 0
+            factory_has_ore[x-1:x+2, y-1:y+2] = 1 if factory["cargo"]["ore"] > 0 else 0
+            factory_will_survive[x-1:x+2, y-1:y+2] = 1 if factory["cargo"]["water"] > 15 else 0
+            
 
         for factory_id in enemy_factories:
             factory = enemy_factories[factory_id]
             x, y = factory["pos"][0], factory["pos"][1]
 
             factories[x-1:x+2, y-1:y+2] = -1
-            factory_ice[x-1:x+2, y-1:y+2] = - factory["cargo"]["ice"] / 150
-            factory_water[x-1:x+2, y-1:y+2] = - factory["cargo"]["water"] / 150
-            factory_metal[x-1:x+2, y-1:y+2] = - factory["cargo"]["metal"] / 150
-            factory_ore[x-1:x+2, y-1:y+2] = - factory["cargo"]["ore"] / 150
+            factory_ice[x-1:x+2, y-1:y+2] = - factory["cargo"]["ice"] / 500
+            factory_water[x-1:x+2, y-1:y+2] = - factory["cargo"]["water"] / 500
+            factory_metal[x-1:x+2, y-1:y+2] = - factory["cargo"]["metal"] / 500
+            factory_ore[x-1:x+2, y-1:y+2] = - factory["cargo"]["ore"] / 500
+
+            factory_has_ice[x-1:x+2, y-1:y+2] = -1 if factory["cargo"]["ice"] > 0 else 0
+            factory_has_ore[x-1:x+2, y-1:y+2] = -1 if factory["cargo"]["ore"] > 0 else 0
+            factory_will_survive[x-1:x+2, y-1:y+2] = -1 if factory["cargo"]["water"] > 15 else 0
+
 
         # 30 channels of information!
         obs = np.stack([
@@ -604,11 +627,16 @@ class CustomLuxEnv(gym.Env):
             unit_ore,
             unit_power,
             unit_on_factories,
+            unit_has_ice,
+            unit_has_ore,
             factories,
             factory_ice,
             factory_metal,
             factory_ore,
             factory_water,
+            factory_has_ice,
+            factory_has_ore,
+            factory_will_survive
         ]).astype("float64")
 
         # transpose for channel last
