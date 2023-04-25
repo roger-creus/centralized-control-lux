@@ -4,9 +4,9 @@ This repository contains the source code for the project "Centralized control fo
 
 &rarr; The main scripts for understanding the code are **fully commented**. We present the PDF report and the code in the following sections.
 
-&rarr; The full report of the project is available [here](www.google.com).
+&rarr; The full report of the project is available [here](https://github.com/roger-creus/centralized-control-lux/blob/main/report.pdf).
 
-&rarr; The Weights & Biases logs of our experiments are available [here](www.google.com) (hyperparameter sweep) and [here](www.google.com) (best configuration).
+&rarr; The Weights & Biases logs of our experiments are available [here](https://api.wandb.ai/links/rogercreus/49pdlt7a).
 
 
 |  PPO in Lux | during training |  
@@ -34,7 +34,7 @@ torchrun --standalone --nproc_per_node 1 ppo_res_gridnet_multigpu.py --device-id
 ```
 
 
-The best agent was trained using the best parameters discovered in the [hyperparameter sweep](www.google.com) and 16 processes on 8 GPUs, running:
+The best agent was trained using the best parameters discovered in the [hyperparameter sweep](https://api.wandb.ai/links/rogercreus/49pdlt7a) and 16 processes on 8 GPUs, running:
 
 ```
 torchrun --standalone --nproc_per_node 16 ppo_pixel_gridnet_multigpu.py 
@@ -55,7 +55,6 @@ torchrun --standalone --nproc_per_node 16 ppo_pixel_gridnet_multigpu.py
 --device-ids 0 0 1 1 2 2 3 3 4 4 5 5 6 6 7 7
 
 ```
-
 
 
 ### Description
