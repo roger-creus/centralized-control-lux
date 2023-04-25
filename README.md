@@ -70,6 +70,17 @@ We propose a pixel-to-pixel architecture that we train with Proximal Policy Opti
 </div>
 
 
+### Results
+
+<div align="center">
+  <img src="imgs/exp_logs.png" alt="Training curves for the final configuration" width="75%" />
+</div>
+
+<div align="center">
+  <img src="imgs/exp_logs2.png" alt="Training curves for the final configuration" width="75%" />
+</div>
+
+
 ### Citation
 
 If you use this code, please cite it as below
