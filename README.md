@@ -1,5 +1,7 @@
 # Centralized control for multi-agent RL in a complex Real-Time-Strategy game
 
+&rarr; **See the full article [here](https://arxiv.org/abs/2304.13004)**
+
 This repository contains the source code for the project "Centralized control for multi-agent RL in a complex Real-Time-Strategy game", which was submitted as the final project in the [COMP579 - Reinforcement Learning course at McGill](https://www.cs.mcgill.ca/~dprecup/courses/Winter2023/syllabus.html) given by Prof. Doina Precup in Winter 2023.
 
 &rarr; The main scripts for understanding the code are **fully commented**. We present the PDF report and the code in the following sections.
@@ -90,12 +92,11 @@ We propose a pixel-to-pixel architecture that we train with Proximal Policy Opti
 If you use this code, please cite it as below
 
 ```
-@misc{creus2023centralized,
-author = {Creus Castanyer, Roger},
-month = {4},
-title = {Centralized Control for Multi-Agent RL in a complex Real-Time-Strategy game},
-url = {https://github.com/roger-creus/lux-ai-rl},
-year = {2023}
+@article{castanyer2023centralized,
+  title={Centralized control for multi-agent RL in a complex Real-Time-Strategy game},
+  author={Castanyer, Roger Creus},
+  journal={arXiv preprint arXiv:2304.13004},
+  year={2023}
 }
 ```
 
